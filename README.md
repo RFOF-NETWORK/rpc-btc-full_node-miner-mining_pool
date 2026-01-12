@@ -2252,19 +2252,372 @@ python: stratum server
 -------------------------
 Write-TextFile "$ROOT/src/python/stratum/stratum_server.py" @'
 """
-Minimaler Stratum-Server-Skeleton.
+Minimaler Stratum-Server mit subscribe/authorize/notify/submit
+ABCD-gerecht, selbst-erklärend, ausführbar.
+
+WICHTIG:
+- Kein Mining, keine Hashing- oder Konsens-Logik hier.
+- Kein direkter Zugriff auf C/C++-Module.
+- Nur Protokoll- und Orchestrierungs-Logik.
+
+Aufgabe:
+- TCP-Server starten
+- Stratum-JSON-Nachrichten verarbeiten
+- Mining.subscribe / authorize / notify / submit implementieren
+- Worker und Jobs im Speicher verwalten
+- Später an Mining-Engine + WS-Backend andockbar
 """
 
+import json
 import socket
 import threading
-import json
+import time
+from typing import Any, Dict, List, Tuple
 
 from ..core.config import load_config
+from ..core.rpc_client import RpcClient
 
-def handle_client(conn, addr):
+# ============================================================
+# Globale In-Memory-Strukturen
+# ============================================================
+
+# Verbundene Miner (pro TCP-Verbindung)
+MINERS_LOCK = threading.Lock()
+MINERS: Dict[socket.socket, Dict[str, Any]] = {}
+
+# Globale Jobs (vereinfachtes Modell)
+JOBS_LOCK = threading.Lock()
+JOBS: Dict[str, Dict[str, Any]] = {}
+
+# Zähler / IDs
+JOB_COUNTER_LOCK = threading.Lock()
+JOB_COUNTER = 0
+
+EXTRANONCE_COUNTER_LOCK = threading.Lock()
+EXTRANONCE_COUNTER = 0
+
+
+# ============================================================
+# Hilfsfunktionen für IDs und ExtraNonce
+# ============================================================
+
+def next_job_id() -> str:
+    global JOB_COUNTER
+    with JOB_COUNTER_LOCK:
+        JOB_COUNTER += 1
+        return f"job-{JOB_COUNTER}"
+
+
+def next_extranonce1() -> str:
+    """
+    Erzeugt eine simple steigende ExtraNonce1 (Hex-String).
+    Später austauschbar gegen deterministisches Schema.
+    """
+    global EXTRANONCE_COUNTER
+    with EXTRANONCE_COUNTER_LOCK:
+        EXTRANONCE_COUNTER += 1
+        return f"{EXTRANONCE_COUNTER:08x}"
+
+
+# ============================================================
+# JSON-Hilfsfunktionen
+# ============================================================
+
+def send_json(conn: socket.socket, obj: Dict[str, Any]) -> None:
+    """
+    Sendet ein JSON-Objekt als einzelne Zeile.
+    """
+    line = json.dumps(obj, separators=(",", ":")) + "\n"
+    conn.sendall(line.encode("utf-8"))
+
+
+def make_result(id_value: Any, result: Any = None, error: Any = None) -> Dict[str, Any]:
+    """
+    Standard-Stratum-Antwort.
+    """
+    return {
+        "id": id_value,
+        "result": result,
+        "error": error,
+    }
+
+
+# ============================================================
+# Node/Template-Hilfen (vereinfachter Job-Builder)
+# ============================================================
+
+class TemplateManager:
+    """
+    Minimaler Template-Manager:
+    - Holt getblocktemplate() vom Node
+    - Baut daraus vereinfachte Job-Struktur für Stratum.notify
+    """
+
+    def __init__(self) -> None:
+        cfg = load_config()
+        self.rpc = RpcClient(
+            host=cfg.rpc_host,
+            port=cfg.rpc_port,
+            user=cfg.rpc_user,
+            password=cfg.rpc_password,
+        )
+
+    def build_job(self) -> Dict[str, Any]:
+        """
+        Holt ein Template und baut einen simplen Job.
+
+        Dies ist bewusst nur ein Skeleton:
+        - Coinbase- und Merkle-Berechnung folgen später
+        - Aktuell: nur Platzhalter-Felder
+        """
+        try:
+            tmpl = self.rpc.get_block_template({})
+        except Exception as e:
+            # Fallback-Job bei RPC-Fehler
+            return {
+                "job_id": next_job_id(),
+                "prevhash": "",
+                "coinbase1": "",
+                "coinbase2": "",
+                "merkle_branch": [],
+                "version": 0,
+                "nbits": "",
+                "ntime": "",
+                "clean_jobs": True,
+                "error": str(e),
+            }
+
+        job_id = next_job_id()
+        prevhash = tmpl.get("previousblockhash", "")
+        version = tmpl.get("version", 0)
+        nbits = tmpl.get("bits", "")
+        curtime = tmpl.get("curtime", int(time.time()))
+
+        # Stratum-typische Job-Struktur (vereinfachtes Modell)
+        job = {
+            "job_id": job_id,
+            "prevhash": prevhash,
+            "coinbase1": "",     # später: echter Coinbase-Teil 1
+            "coinbase2": "",     # später: echter Coinbase-Teil 2
+            "merkle_branch": [], # später: echte Merkle-Branch
+            "version": version,
+            "nbits": nbits,
+            "ntime": f"{curtime:x}",
+            "clean_jobs": True,
+        }
+
+        with JOBS_LOCK:
+            JOBS[job_id] = job
+
+        return job
+
+
+TEMPLATE_MANAGER = TemplateManager()
+
+
+# ============================================================
+# Mining.subscribe
+# ============================================================
+
+def handle_subscribe(conn: socket.socket, msg: Dict[str, Any]) -> None:
+    """
+    mining.subscribe
+    params: [client_version, extra_params...]
+    Ergebnis: [ [ [subscription_type, subscription_id], ... ], extranonce1, extranonce2_size ]
+    """
+    extranonce1 = next_extranonce1()
+    extranonce2_size = 4  # später konfigurierbar
+
+    with MINERS_LOCK:
+        miner = MINERS.get(conn, {})
+        miner.setdefault("authorized", False)
+        miner["extranonce1"] = extranonce1
+        miner["extranonce2_size"] = extranonce2_size
+        miner.setdefault("worker_name", None)
+        miner.setdefault("last_share_time", None)
+        miner.setdefault("shares_valid", 0)
+        miner.setdefault("shares_invalid", 0)
+        MINERS[conn] = miner
+
+    # Stratum-typische Subscription-Antwort
+    subscriptions = [
+        ["mining.notify", "1"],
+        ["mining.set_difficulty", "1"],
+    ]
+    result = [subscriptions, extranonce1, extranonce2_size]
+    send_json(conn, make_result(msg.get("id"), result=result))
+
+
+# ============================================================
+# Mining.authorize
+# ============================================================
+
+def handle_authorize(conn: socket.socket, msg: Dict[str, Any]) -> None:
+    """
+    mining.authorize
+    params: [ "user.worker", "password" ]
+    Ergebnis: True/False
+    """
+    params = msg.get("params") or []
+    if len(params) < 1:
+        send_json(conn, make_result(msg.get("id"), result=False, error=["missing-params", "No worker name", None]))
+        return
+
+    worker_name = params[0]
+
+    # Hier könnte ein echtes Auth-System stehen.
+    # Für jetzt: akzeptiere alle Worker.
+    with MINERS_LOCK:
+        miner = MINERS.get(conn, {})
+        miner["authorized"] = True
+        miner["worker_name"] = worker_name
+        MINERS[conn] = miner
+
+    send_json(conn, make_result(msg.get("id"), result=True))
+
+
+# ============================================================
+# mining.notify (Job-Verteilung)
+# ============================================================
+
+def send_notify(conn: socket.socket, job: Dict[str, Any]) -> None:
+    """
+    Sendet einen mining.notify-Call an einen einzelnen Miner.
+    """
+    params = [
+        job["job_id"],
+        job["prevhash"],
+        job["coinbase1"],
+        job["coinbase2"],
+        job["merkle_branch"],
+        f"{job['version']:08x}",
+        job["nbits"],
+        job["ntime"],
+        job["clean_jobs"],
+    ]
+    notify_msg = {
+        "id": None,
+        "method": "mining.notify",
+        "params": params,
+    }
+    send_json(conn, notify_msg)
+
+
+def broadcast_notify(job: Dict[str, Any]) -> None:
+    """
+    Sendet einen neuen Job an alle autorisierten Miner.
+    """
+    with MINERS_LOCK:
+        for conn, miner in list(MINERS.items()):
+            if not miner.get("authorized", False):
+                continue
+            try:
+                send_notify(conn, job)
+            except OSError:
+                # Verbindung kaputt → Miner entfernen
+                MINERS.pop(conn, None)
+
+
+def new_job_to_all() -> Dict[str, Any]:
+    """
+    Erzeugt einen neuen Job und broadcastet ihn.
+    """
+    job = TEMPLATE_MANAGER.build_job()
+    broadcast_notify(job)
+    return job
+
+
+# ============================================================
+# mining.submit (Share-Abgabe)
+# ============================================================
+
+def validate_share_placeholder(job_id: str, params: List[Any]) -> bool:
+    """
+    Platzhalter für Share-Validierung.
+    Später: Aufruf von validator.cpp + hashing.c.
+
+    Aktuell:
+    - Nimmt jede Share als gültig an.
+    - Dient nur als funktionsfähiger Skeleton.
+    """
+    return True
+
+
+def handle_submit(conn: socket.socket, msg: Dict[str, Any]) -> None:
+    """
+    mining.submit
+    params: [worker_name, job_id, extranonce2, ntime, nonce]
+    """
+    params = msg.get("params") or []
+    if len(params) < 5:
+        send_json(conn, make_result(msg.get("id"), result=False, error=["missing-params", "Need 5 params", None]))
+        return
+
+    worker_name, job_id, extranonce2, ntime, nonce = params
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+
+    if job is None:
+        send_json(conn, make_result(msg.get("id"), result=False, error=["unknown-job", f"Job {job_id} not found", None]))
+        return
+
+    # Platzhalter-Validierung
+    valid = validate_share_placeholder(job_id, params)
+
+    with MINERS_LOCK:
+        miner = MINERS.get(conn, {})
+        if valid:
+            miner["shares_valid"] = miner.get("shares_valid", 0) + 1
+            miner["last_share_time"] = time.time()
+        else:
+            miner["shares_invalid"] = miner.get("shares_invalid", 0) + 1
+        MINERS[conn] = miner
+
+    # Ergebnis an Miner
+    if valid:
+        send_json(conn, make_result(msg.get("id"), result=True))
+    else:
+        send_json(conn, make_result(msg.get("id"), result=False, error=["invalid-share", "Share rejected", None]))
+
+
+# ============================================================
+# Dispatcher für eingehende Stratum-Methoden
+# ============================================================
+
+def handle_stratum_message(conn: socket.socket, msg: Dict[str, Any]) -> None:
+    method = msg.get("method")
+    if method == "mining.subscribe":
+        handle_subscribe(conn, msg)
+    elif method == "mining.authorize":
+        handle_authorize(conn, msg)
+    elif method == "mining.submit":
+        handle_submit(conn, msg)
+    else:
+        # Unbekannte Methode → neutrale Antwort
+        send_json(conn, make_result(msg.get("id"), result=None, error=["unknown-method", method, None]))
+
+
+# ============================================================
+# Client-Handling (Socket-Level)
+# ============================================================
+
+def handle_client(conn: socket.socket, addr: Tuple[str, int]) -> None:
     print(f"[STRATUM] Verbunden: {addr}")
-    with conn:
-        buffer = ""
+    buffer = ""
+
+    with MINERS_LOCK:
+        MINERS[conn] = {
+            "authorized": False,
+            "worker_name": None,
+            "extranonce1": None,
+            "extranonce2_size": None,
+            "last_share_time": None,
+            "shares_valid": 0,
+            "shares_invalid": 0,
+        }
+
+    try:
         while True:
             data = conn.recv(4096)
             if not data:
@@ -2278,35 +2631,62 @@ def handle_client(conn, addr):
                     continue
                 try:
                     msg = json.loads(line)
-                    print(f"[STRATUM] RX von {addr}: {msg}")
-                    # TODO: Implementiere hier Mining.subscribe, authorize, submit, notify
-                    response = {
-                        "id": msg.get("id"),
-                        "result": None,
-                        "error": None
-                    }
-                    conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
                 except json.JSONDecodeError:
                     print(f"[STRATUM] Ungültiges JSON von {addr}: {line}")
+                    continue
+                print(f"[STRATUM] RX von {addr}: {msg}")
+                handle_stratum_message(conn, msg)
+    finally:
+        with MINERS_LOCK:
+            MINERS.pop(conn, None)
+        conn.close()
+        print(f"[STRATUM] Verbindung endgültig geschlossen: {addr}")
 
-def start_stratum():
+
+# ============================================================
+# Server-Start
+# ============================================================
+
+def start_stratum() -> None:
+    """
+    Startet den Stratum-Server:
+
+    - Bindet an konfiguriertem Port (oder Default 3333)
+    - Nimmt Miner-Verbindungen entgegen
+    - Startet pro Verbindung einen Worker-Thread
+    - Erzeugt initial einen Job und broadcastet ihn
+    """
+
     cfg = load_config()
-    host = cfg["stratum"]["host"]
-    port = cfg["stratum"]["port"]
+    host = "0.0.0.0"
+    port = int(getattr(cfg, "stratum_port", 3333))
 
-    s = socket.socket(socket.AFINET, socket.SOCKSTREAM)
+    # Initialen Job erzeugen
+    job = TEMPLATE_MANAGER.build_job()
+    # Dieser wird erst an Miner gesendet, wenn sie subscribed+authorized sind.
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((host, port))
     s.listen()
     print(f"[STRATUM] Lausche auf {host}:{port}")
+
     try:
         while True:
             conn, addr = s.accept()
             t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
             t.start()
+            # Bei neuen Minern kann später direkt new_job_to_all() aufgerufen werden,
+            # wenn Jobs aktualisiert wurden.
     finally:
         s.close()
 
-if name == "main":
+
+# ============================================================
+# Einstiegspunkt
+# ============================================================
+
+if __name__ == "__main__":
     start_stratum()
 '@
 
@@ -2317,145 +2697,442 @@ python: websocket backend
 -------------------------
 Write-TextFile "$ROOT/src/python/ws/ws_backend.py" @'
 """
-Minimaler WebSocket-Backend-Skeleton (UI-Anbindung).
+Minimaler Stratum-Server mit subscribe/authorize/notify/submit
+ABCD-gerecht, selbst-erklärend, ausführbar.
+
+WICHTIG:
+- Kein Mining, keine Hashing- oder Konsens-Logik hier.
+- Kein direkter Zugriff auf C/C++-Module.
+- Nur Protokoll- und Orchestrierungs-Logik.
+
+Aufgabe:
+- TCP-Server starten
+- Stratum-JSON-Nachrichten verarbeiten
+- Mining.subscribe / authorize / notify / submit implementieren
+- Worker und Jobs im Speicher verwalten
+- Später an Mining-Engine + WS-Backend andockbar
 """
 
+import json
 import socket
 import threading
-import base64
-import hashlib
-import struct
+import time
+from typing import Any, Dict, List, Tuple
 
 from ..core.config import load_config
+from ..core.rpc_client import RpcClient
 
-GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-clients = []
+# ============================================================
+# Globale In-Memory-Strukturen
+# ============================================================
 
-def recvhttprequest(conn):
-    data = b""
-    while b"\r\n\r\n" not in data:
-        chunk = conn.recv(1024)
-        if not chunk:
-            break
-        data += chunk
-    return data.decode("utf-8", errors="ignore")
+# Verbundene Miner (pro TCP-Verbindung)
+MINERS_LOCK = threading.Lock()
+MINERS: Dict[socket.socket, Dict[str, Any]] = {}
 
-def sendhttpresponse(conn, key):
-    accept = base64.b64encode(
-        hashlib.sha1((key + GUID).encode("utf-8")).digest()
-    ).decode("utf-8")
-    response = (
-        "HTTP/1.1 101 Switching Protocols\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        f"Sec-WebSocket-Accept: {accept}\r\n"
-        "\r\n"
-    )
-    conn.sendall(response.encode("utf-8"))
+# Globale Jobs (vereinfachtes Modell)
+JOBS_LOCK = threading.Lock()
+JOBS: Dict[str, Dict[str, Any]] = {}
 
-def decode_frame(conn):
-    header = conn.recv(2)
-    if not header:
-        return None
-    b1, b2 = header
-    opcode = b1 & 0x0F
-    masked = b2 & 0x80
-    length = b2 & 0x7F
+# Zähler / IDs
+JOB_COUNTER_LOCK = threading.Lock()
+JOB_COUNTER = 0
 
-    if length == 126:
-        ext = conn.recv(2)
-        length = struct.unpack(">H", ext)[0]
-    elif length == 127:
-        ext = conn.recv(8)
-        length = struct.unpack(">Q", ext)[0]
+EXTRANONCE_COUNTER_LOCK = threading.Lock()
+EXTRANONCE_COUNTER = 0
 
-    mask = b""
-    if masked:
-        mask = conn.recv(4)
 
-    payload = b""
-    while len(payload) < length:
-        chunk = conn.recv(length - len(payload))
-        if not chunk:
-            break
-        payload += chunk
+# ============================================================
+# Hilfsfunktionen für IDs und ExtraNonce
+# ============================================================
 
-    if masked:
-        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+def next_job_id() -> str:
+    global JOB_COUNTER
+    with JOB_COUNTER_LOCK:
+        JOB_COUNTER += 1
+        return f"job-{JOB_COUNTER}"
 
-    if opcode == 0x8:
-        return None
 
-    return payload.decode("utf-8", errors="ignore")
+def next_extranonce1() -> str:
+    """
+    Erzeugt eine simple steigende ExtraNonce1 (Hex-String).
+    Später austauschbar gegen deterministisches Schema.
+    """
+    global EXTRANONCE_COUNTER
+    with EXTRANONCE_COUNTER_LOCK:
+        EXTRANONCE_COUNTER += 1
+        return f"{EXTRANONCE_COUNTER:08x}"
 
-def encode_frame(message):
-    payload = message.encode("utf-8")
-    b1 = 0x81
-    length = len(payload)
-    if length < 126:
-        header = struct.pack("!BB", b1, length)
-    elif length < (1 << 16):
-        header = struct.pack("!BBH", b1, 126, length)
-    else:
-        header = struct.pack("!BBQ", b1, 127, length)
-    return header + payload
 
-def broadcast(message):
-    frame = encode_frame(message)
-    for c in list(clients):
+# ============================================================
+# JSON-Hilfsfunktionen
+# ============================================================
+
+def send_json(conn: socket.socket, obj: Dict[str, Any]) -> None:
+    """
+    Sendet ein JSON-Objekt als einzelne Zeile.
+    """
+    line = json.dumps(obj, separators=(",", ":")) + "\n"
+    conn.sendall(line.encode("utf-8"))
+
+
+def make_result(id_value: Any, result: Any = None, error: Any = None) -> Dict[str, Any]:
+    """
+    Standard-Stratum-Antwort.
+    """
+    return {
+        "id": id_value,
+        "result": result,
+        "error": error,
+    }
+
+
+# ============================================================
+# Node/Template-Hilfen (vereinfachter Job-Builder)
+# ============================================================
+
+class TemplateManager:
+    """
+    Minimaler Template-Manager:
+    - Holt getblocktemplate() vom Node
+    - Baut daraus vereinfachte Job-Struktur für Stratum.notify
+    """
+
+    def __init__(self) -> None:
+        cfg = load_config()
+        self.rpc = RpcClient(
+            host=cfg.rpc_host,
+            port=cfg.rpc_port,
+            user=cfg.rpc_user,
+            password=cfg.rpc_password,
+        )
+
+    def build_job(self) -> Dict[str, Any]:
+        """
+        Holt ein Template und baut einen simplen Job.
+
+        Dies ist bewusst nur ein Skeleton:
+        - Coinbase- und Merkle-Berechnung folgen später
+        - Aktuell: nur Platzhalter-Felder
+        """
         try:
-            c.sendall(frame)
-        except OSError:
-            clients.remove(c)
+            tmpl = self.rpc.get_block_template({})
+        except Exception as e:
+            # Fallback-Job bei RPC-Fehler
+            return {
+                "job_id": next_job_id(),
+                "prevhash": "",
+                "coinbase1": "",
+                "coinbase2": "",
+                "merkle_branch": [],
+                "version": 0,
+                "nbits": "",
+                "ntime": "",
+                "clean_jobs": True,
+                "error": str(e),
+            }
 
-def handle_client(conn, addr):
-    print(f"[WS] Neue Verbindung von {addr}")
-    request = recvhttprequest(conn)
-    if "Sec-WebSocket-Key:" not in request:
-        print(f"[WS] Kein WebSocket-Upgrade von {addr}")
-        conn.close()
+        job_id = next_job_id()
+        prevhash = tmpl.get("previousblockhash", "")
+        version = tmpl.get("version", 0)
+        nbits = tmpl.get("bits", "")
+        curtime = tmpl.get("curtime", int(time.time()))
+
+        # Stratum-typische Job-Struktur (vereinfachtes Modell)
+        job = {
+            "job_id": job_id,
+            "prevhash": prevhash,
+            "coinbase1": "",     # später: echter Coinbase-Teil 1
+            "coinbase2": "",     # später: echter Coinbase-Teil 2
+            "merkle_branch": [], # später: echte Merkle-Branch
+            "version": version,
+            "nbits": nbits,
+            "ntime": f"{curtime:x}",
+            "clean_jobs": True,
+        }
+
+        with JOBS_LOCK:
+            JOBS[job_id] = job
+
+        return job
+
+
+TEMPLATE_MANAGER = TemplateManager()
+
+
+# ============================================================
+# Mining.subscribe
+# ============================================================
+
+def handle_subscribe(conn: socket.socket, msg: Dict[str, Any]) -> None:
+    """
+    mining.subscribe
+    params: [client_version, extra_params...]
+    Ergebnis: [ [ [subscription_type, subscription_id], ... ], extranonce1, extranonce2_size ]
+    """
+    extranonce1 = next_extranonce1()
+    extranonce2_size = 4  # später konfigurierbar
+
+    with MINERS_LOCK:
+        miner = MINERS.get(conn, {})
+        miner.setdefault("authorized", False)
+        miner["extranonce1"] = extranonce1
+        miner["extranonce2_size"] = extranonce2_size
+        miner.setdefault("worker_name", None)
+        miner.setdefault("last_share_time", None)
+        miner.setdefault("shares_valid", 0)
+        miner.setdefault("shares_invalid", 0)
+        MINERS[conn] = miner
+
+    # Stratum-typische Subscription-Antwort
+    subscriptions = [
+        ["mining.notify", "1"],
+        ["mining.set_difficulty", "1"],
+    ]
+    result = [subscriptions, extranonce1, extranonce2_size]
+    send_json(conn, make_result(msg.get("id"), result=result))
+
+
+# ============================================================
+# Mining.authorize
+# ============================================================
+
+def handle_authorize(conn: socket.socket, msg: Dict[str, Any]) -> None:
+    """
+    mining.authorize
+    params: [ "user.worker", "password" ]
+    Ergebnis: True/False
+    """
+    params = msg.get("params") or []
+    if len(params) < 1:
+        send_json(conn, make_result(msg.get("id"), result=False, error=["missing-params", "No worker name", None]))
         return
 
-    key_line = [l for l in request.split("\r\n") if "Sec-WebSocket-Key:" in l][0]
-    key = key_line.split(":", 1)[1].strip()
-    sendhttpresponse(conn, key)
+    worker_name = params[0]
 
-    clients.append(conn)
-    broadcast(f"[WS] Client verbunden: {addr}")
+    # Hier könnte ein echtes Auth-System stehen.
+    # Für jetzt: akzeptiere alle Worker.
+    with MINERS_LOCK:
+        miner = MINERS.get(conn, {})
+        miner["authorized"] = True
+        miner["worker_name"] = worker_name
+        MINERS[conn] = miner
+
+    send_json(conn, make_result(msg.get("id"), result=True))
+
+
+# ============================================================
+# mining.notify (Job-Verteilung)
+# ============================================================
+
+def send_notify(conn: socket.socket, job: Dict[str, Any]) -> None:
+    """
+    Sendet einen mining.notify-Call an einen einzelnen Miner.
+    """
+    params = [
+        job["job_id"],
+        job["prevhash"],
+        job["coinbase1"],
+        job["coinbase2"],
+        job["merkle_branch"],
+        f"{job['version']:08x}",
+        job["nbits"],
+        job["ntime"],
+        job["clean_jobs"],
+    ]
+    notify_msg = {
+        "id": None,
+        "method": "mining.notify",
+        "params": params,
+    }
+    send_json(conn, notify_msg)
+
+
+def broadcast_notify(job: Dict[str, Any]) -> None:
+    """
+    Sendet einen neuen Job an alle autorisierten Miner.
+    """
+    with MINERS_LOCK:
+        for conn, miner in list(MINERS.items()):
+            if not miner.get("authorized", False):
+                continue
+            try:
+                send_notify(conn, job)
+            except OSError:
+                # Verbindung kaputt → Miner entfernen
+                MINERS.pop(conn, None)
+
+
+def new_job_to_all() -> Dict[str, Any]:
+    """
+    Erzeugt einen neuen Job und broadcastet ihn.
+    """
+    job = TEMPLATE_MANAGER.build_job()
+    broadcast_notify(job)
+    return job
+
+
+# ============================================================
+# mining.submit (Share-Abgabe)
+# ============================================================
+
+def validate_share_placeholder(job_id: str, params: List[Any]) -> bool:
+    """
+    Platzhalter für Share-Validierung.
+    Später: Aufruf von validator.cpp + hashing.c.
+
+    Aktuell:
+    - Nimmt jede Share als gültig an.
+    - Dient nur als funktionsfähiger Skeleton.
+    """
+    return True
+
+
+def handle_submit(conn: socket.socket, msg: Dict[str, Any]) -> None:
+    """
+    mining.submit
+    params: [worker_name, job_id, extranonce2, ntime, nonce]
+    """
+    params = msg.get("params") or []
+    if len(params) < 5:
+        send_json(conn, make_result(msg.get("id"), result=False, error=["missing-params", "Need 5 params", None]))
+        return
+
+    worker_name, job_id, extranonce2, ntime, nonce = params
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+
+    if job is None:
+        send_json(conn, make_result(msg.get("id"), result=False, error=["unknown-job", f"Job {job_id} not found", None]))
+        return
+
+    # Platzhalter-Validierung
+    valid = validate_share_placeholder(job_id, params)
+
+    with MINERS_LOCK:
+        miner = MINERS.get(conn, {})
+        if valid:
+            miner["shares_valid"] = miner.get("shares_valid", 0) + 1
+            miner["last_share_time"] = time.time()
+        else:
+            miner["shares_invalid"] = miner.get("shares_invalid", 0) + 1
+        MINERS[conn] = miner
+
+    # Ergebnis an Miner
+    if valid:
+        send_json(conn, make_result(msg.get("id"), result=True))
+    else:
+        send_json(conn, make_result(msg.get("id"), result=False, error=["invalid-share", "Share rejected", None]))
+
+
+# ============================================================
+# Dispatcher für eingehende Stratum-Methoden
+# ============================================================
+
+def handle_stratum_message(conn: socket.socket, msg: Dict[str, Any]) -> None:
+    method = msg.get("method")
+    if method == "mining.subscribe":
+        handle_subscribe(conn, msg)
+    elif method == "mining.authorize":
+        handle_authorize(conn, msg)
+    elif method == "mining.submit":
+        handle_submit(conn, msg)
+    else:
+        # Unbekannte Methode → neutrale Antwort
+        send_json(conn, make_result(msg.get("id"), result=None, error=["unknown-method", method, None]))
+
+
+# ============================================================
+# Client-Handling (Socket-Level)
+# ============================================================
+
+def handle_client(conn: socket.socket, addr: Tuple[str, int]) -> None:
+    print(f"[STRATUM] Verbunden: {addr}")
+    buffer = ""
+
+    with MINERS_LOCK:
+        MINERS[conn] = {
+            "authorized": False,
+            "worker_name": None,
+            "extranonce1": None,
+            "extranonce2_size": None,
+            "last_share_time": None,
+            "shares_valid": 0,
+            "shares_invalid": 0,
+        }
 
     try:
         while True:
-            msg = decode_frame(conn)
-            if msg is None:
+            data = conn.recv(4096)
+            if not data:
+                print(f"[STRATUM] Verbindung beendet: {addr}")
                 break
-            print(f"[WS] RX von {addr}: {msg}")
-            # TODO: Hier Pool-Stats, Miner-Status, Node-Infos ans UI pushen
-            broadcast(f"[ECHO] {msg}")
+            buffer += data.decode("utf-8", errors="ignore")
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    print(f"[STRATUM] Ungültiges JSON von {addr}: {line}")
+                    continue
+                print(f"[STRATUM] RX von {addr}: {msg}")
+                handle_stratum_message(conn, msg)
     finally:
-        print(f"[WS] Verbindung beendet: {addr}")
-        if conn in clients:
-            clients.remove(conn)
+        with MINERS_LOCK:
+            MINERS.pop(conn, None)
         conn.close()
+        print(f"[STRATUM] Verbindung endgültig geschlossen: {addr}")
 
-def start_ws():
+
+# ============================================================
+# Server-Start
+# ============================================================
+
+def start_stratum() -> None:
+    """
+    Startet den Stratum-Server:
+
+    - Bindet an konfiguriertem Port (oder Default 3333)
+    - Nimmt Miner-Verbindungen entgegen
+    - Startet pro Verbindung einen Worker-Thread
+    - Erzeugt initial einen Job und broadcastet ihn
+    """
+
     cfg = load_config()
-    host = cfg["websocket"]["host"]
-    port = cfg["websocket"]["port"]
+    host = "0.0.0.0"
+    port = int(getattr(cfg, "stratum_port", 3333))
 
-    s = socket.socket(socket.AFINET, socket.SOCKSTREAM)
+    # Initialen Job erzeugen
+    job = TEMPLATE_MANAGER.build_job()
+    # Dieser wird erst an Miner gesendet, wenn sie subscribed+authorized sind.
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((host, port))
     s.listen()
-    print(f"[WS] Lausche auf {host}:{port}")
+    print(f"[STRATUM] Lausche auf {host}:{port}")
+
     try:
         while True:
             conn, addr = s.accept()
             t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
             t.start()
+            # Bei neuen Minern kann später direkt new_job_to_all() aufgerufen werden,
+            # wenn Jobs aktualisiert wurden.
     finally:
         s.close()
 
-if name == "main":
-    start_ws()
+
+# ============================================================
+# Einstiegspunkt
+# ============================================================
+
+if __name__ == "__main__":
+    start_stratum()
 '@
 
 -------------------------
