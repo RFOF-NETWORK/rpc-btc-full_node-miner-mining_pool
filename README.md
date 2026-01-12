@@ -217,7 +217,392 @@ Es dient Entwicklern, Auditoren, Forschern und Betreibern als klare Orientierung
 Für tiefere technische Details siehe:
 
 - FULLSTACK-DOKUMENT.md  
-- HANDBUCH.md  
+- HANDBUCH.md
+
+---
+```
+"""
+run_build.py
+Autonomer UI-Build- und Deploy-Supervisor für btc-miner-pool-ui.
+
+Aufgaben:
+- Projektpfade prüfen
+- PowerShell-Build ausführen (build-btc-ui.ps1)
+- Build-Logfile schreiben
+- files-map.json validieren
+- UI-Version ermitteln und ui-version.json schreiben
+- UI-Build in das Backend-Projekt deployen
+- ui-deploy.json erzeugen (Metadaten für Backend/UI)
+- Niemals das Backend neu starten oder beenden
+
+WICHTIG:
+- Kein Eingriff in Backend-Logik
+- Kein Start/Stop von Backend-Prozessen
+- Nur Build + Deploy + Metadaten
+"""
+
+import subprocess
+import sys
+import os
+import json
+from datetime import datetime
+from pathlib import Path
+
+# Wurzelpfade
+UI_ROOT = Path("btc-miner-pool-ui").resolve()
+BACKEND_ROOT = Path("btc-miner-pool-backend").resolve()
+
+PS_SCRIPT = UI_ROOT / "build-btc-ui.ps1"
+LOG_DIR = UI_ROOT / "build-logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Logdatei mit Zeitstempel
+LOG_FILE = LOG_DIR / f"build-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+
+# Standard-Build-Output-Verzeichnis (an dein Setup anpassbar)
+# Wenn dein PowerShell-Skript in einen anderen Ordner baut, hier anpassen.
+DIST_DIR = UI_ROOT / "dist"
+
+# Zielordner im Backend, in den die UI deployt wird
+BACKEND_UI_DIR = BACKEND_ROOT / "ui"
+
+# Metadaten-Dateien
+UI_VERSION_FILE = BACKEND_UI_DIR / "ui-version.json"
+UI_DEPLOY_FILE = BACKEND_UI_DIR / "ui-deploy.json"
+
+
+def ensure_paths() -> None:
+    """
+    Prüft, ob UI-Projekt und Build-Skript existieren.
+    Bricht mit klarer Fehlermeldung ab, wenn etwas fehlt.
+    """
+    if not UI_ROOT.exists():
+        print(f"[ERROR] Projektordner '{UI_ROOT}' nicht gefunden. Bitte zuerst das Repository initialisieren.")
+        sys.exit(1)
+
+    if not PS_SCRIPT.exists():
+        print(f"[ERROR] PowerShell-Skript '{PS_SCRIPT}' nicht gefunden.")
+        sys.exit(1)
+
+
+def run_powershell_build() -> None:
+    """
+    Führt das PowerShell-Build-Skript aus und schreibt STDOUT/STDERR in eine Logdatei.
+    Bricht ab, wenn der Build fehlschlägt.
+    """
+    print(f"[INFO] Starte PowerShell-Build: {PS_SCRIPT}")
+
+    result = subprocess.run(
+        ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(PS_SCRIPT)],
+        capture_output=True,
+        text=True
+    )
+
+    with LOG_FILE.open("w", encoding="utf-8") as f:
+        f.write("=== STDOUT ===\n")
+        f.write(result.stdout)
+        f.write("\n\n=== STDERR ===\n")
+        f.write(result.stderr)
+
+    if result.returncode != 0:
+        print("[ERROR] PowerShell-Build fehlgeschlagen. Details in Logdatei:")
+        print(str(LOG_FILE))
+        sys.exit(result.returncode)
+
+    print("[INFO] PowerShell-Build erfolgreich abgeschlossen.")
+    print(f"[INFO] Log gespeichert unter: {LOG_FILE}")
+
+
+def verify_files_map() -> None:
+    """
+    Prüft, ob files-map.json existiert und eine nicht-leere Liste enthält.
+    Bricht ab bei Fehlern.
+    """
+    json_path = UI_ROOT / "files-map.json"
+
+    if not json_path.exists():
+        print("[ERROR] Base64-Export fehlt. 'files-map.json' wurde nicht erzeugt.")
+        sys.exit(1)
+
+    try:
+        with json_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, list) or len(data) == 0:
+            print("[ERROR] Base64-Export ist leer oder beschädigt.")
+            sys.exit(1)
+
+        print(f"[INFO] Base64-Export erfolgreich validiert ({len(data)} Dateien).")
+
+    except Exception as e:
+        print(f"[ERROR] Fehler beim Lesen von files-map.json: {e}")
+        sys.exit(1)
+
+
+def detect_build_output() -> Path:
+    """
+    Ermittelt den Build-Output-Ordner.
+    Standard: DIST_DIR (z. B. 'btc-miner-pool-ui/dist').
+
+    Falls dein PowerShell-Skript in einen anderen Ordner baut, kann diese
+    Funktion später erweitert werden (z. B. Lesen aus einer Build-Config).
+    """
+    if not DIST_DIR.exists():
+        print(f"[ERROR] Build-Output-Verzeichnis '{DIST_DIR}' nicht gefunden.")
+        print("[HINT] Bitte prüfe dein PowerShell-Build-Skript oder passe DIST_DIR in run_build.py an.")
+        sys.exit(1)
+
+    return DIST_DIR
+
+
+def copy_ui_to_backend(build_dir: Path) -> None:
+    """
+    Kopiert den UI-Build in den Backend-UI-Ordner.
+    Existierende Dateien werden überschrieben, aber Struktur bleibt stabil.
+    Backend-Prozesse werden NICHT neu gestartet oder beendet.
+    """
+    print(f"[INFO] Deploy UI-Build von '{build_dir}' nach '{BACKEND_UI_DIR}'")
+
+    # Zielordner vorbereiten
+    BACKEND_UI_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Bestehende Dateien entfernen (nur im UI-Unterordner, nicht im gesamten Backend)
+    for item in BACKEND_UI_DIR.iterdir():
+        if item.is_file():
+            item.unlink()
+        elif item.is_dir():
+            # Rekursiv löschen
+            for root, dirs, files in os.walk(item, topdown=False):
+                for name in files:
+                    Path(root, name).unlink()
+                for name in dirs:
+                    Path(root, name).rmdir()
+            item.rmdir()
+
+    # Neu kopieren
+    for root, dirs, files in os.walk(build_dir):
+        rel_root = Path(root).relative_to(build_dir)
+        target_root = BACKEND_UI_DIR / rel_root
+        target_root.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            src = Path(root) / name
+            dst = target_root / name
+            with src.open("rb") as fsrc, dst.open("wb") as fdst:
+                fdst.write(fsrc.read())
+
+    print("[INFO] UI-Build erfolgreich ins Backend deployt.")
+
+
+def write_ui_version(build_dir: Path) -> dict:
+    """
+    Erzeugt ein einfaches UI-Versionsobjekt und schreibt es nach ui-version.json.
+    Rückgabewert ist das Versionsobjekt, das später in ui-deploy.json verwendet wird.
+    """
+    version_info = {
+        "version": datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+        "build_dir": str(build_dir),
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "log_file": str(LOG_FILE),
+    }
+
+    UI_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with UI_VERSION_FILE.open("w", encoding="utf-8") as f:
+        json.dump(version_info, f, indent=2)
+
+    print(f"[INFO] UI-Version geschrieben nach: {UI_VERSION_FILE}")
+    return version_info
+
+
+def write_ui_deploy_metadata(build_dir: Path, version_info: dict) -> None:
+    """
+    Erzeugt ui-deploy.json mit Metadaten zum aktuellen Deploy.
+    Dient für Backend/UI als Audit- und Integrationspunkt.
+    """
+    # Optional: Anzahl Dateien im Build zählen
+    file_count = 0
+    total_size = 0
+    for root, dirs, files in os.walk(build_dir):
+        for name in files:
+            file_count += 1
+            total_size += (Path(root) / name).stat().st_size
+
+    deploy_info = {
+        "deployed_at": datetime.utcnow().isoformat() + "Z",
+        "build_dir": str(build_dir),
+        "file_count": file_count,
+        "total_size_bytes": total_size,
+        "ui_version": version_info.get("version"),
+        "ui_version_meta": version_info,
+    }
+
+    with UI_DEPLOY_FILE.open("w", encoding="utf-8") as f:
+        json.dump(deploy_info, f, indent=2)
+
+    print(f"[INFO] UI-Deploy-Metadaten geschrieben nach: {UI_DEPLOY_FILE}")
+
+
+def main() -> None:
+    print("=== BTC UI AUTONOMER BUILD START ===")
+    ensure_paths()
+    run_powershell_build()
+    verify_files_map()
+
+    build_dir = detect_build_output()
+    copy_ui_to_backend(build_dir)
+
+    version_info = write_ui_version(build_dir)
+    write_ui_deploy_metadata(build_dir, version_info)
+
+    print("=== BUILD & DEPLOY KOMPLETT AUTONOM ABGESCHLOSSEN ===")
+    print("[INFO] Backend wurde NICHT automatisch neu gestartet.")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+```
+"""
+genesis_init.py
+Autonome Genesis-Initialisierung für den Mining-Pool.
+
+Aufgaben:
+- Einmalig Genesis-Zeitpunkt erzeugen
+- Node-Health prüfen (RPC erreichbar, kein IBD, Blockhöhe > 0)
+- genesis.json erzeugen (persistent, niemals überschreiben)
+- System-Metadaten erfassen:
+  - genesis_timestamp
+  - node_version
+  - initial_block_height
+  - config_hash
+  - ui_version (falls vorhanden)
+- Keine Backend-Prozesse starten oder stoppen
+- Keine Kernmodule verändern
+- Rein vorbereitend für run-backend.ps1
+
+Diese Datei wird vom Supervisor (run-backend.ps1) ausgeführt,
+BEVOR Stratum, WS-Backend oder Mining-Loop gestartet werden.
+"""
+
+import os
+import json
+import hashlib
+from pathlib import Path
+from datetime import datetime
+
+# Projektpfade
+ROOT = Path(__file__).resolve().parent.parent.parent
+CONFIG_DIR = ROOT / "config"
+GENESIS_FILE = CONFIG_DIR / "genesis.json"
+BACKEND_CONFIG = CONFIG_DIR / "backend.json"
+UI_VERSION_FILE = ROOT / "ui" / "ui-version.json"
+
+# RPC-Client importieren
+from src.python.core.rpc_client import RpcClient
+from src.python.core.config import load_config
+
+
+def hash_file(path: Path) -> str:
+    """
+    Erzeugt einen SHA256-Hash einer Datei.
+    Dient zur Auditierbarkeit der Backend-Konfiguration.
+    """
+    if not path.exists():
+        return "missing"
+
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(4096):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def node_health_check(rpc: RpcClient) -> dict:
+    """
+    Prüft grundlegende Node-Gesundheit.
+    Keine harten Abbrüche, sondern klare Fehlerausgabe.
+    """
+    try:
+        info = rpc.get_blockchain_info()
+    except Exception as e:
+        return {"ok": False, "error": f"RPC nicht erreichbar: {e}"}
+
+    if info.get("initialblockdownload", True):
+        return {"ok": False, "error": "Node befindet sich im Initial Block Download (IBD)."}
+
+    height = info.get("blocks", 0)
+    if height <= 0:
+        return {"ok": False, "error": "Blockhöhe ist 0 oder ungültig."}
+
+    return {
+        "ok": True,
+        "block_height": height,
+        "difficulty": info.get("difficulty"),
+        "warnings": info.get("warnings"),
+    }
+
+
+def load_ui_version() -> str:
+    """
+    Liest die UI-Version, falls vorhanden.
+    """
+    if not UI_VERSION_FILE.exists():
+        return "unknown"
+
+    try:
+        with UI_VERSION_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("version", "unknown")
+    except Exception:
+        return "unknown"
+
+
+def main():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Wenn Genesis existiert → NICHT überschreiben
+    if GENESIS_FILE.exists():
+        print("[INFO] genesis.json existiert bereits. Keine Neuerzeugung.")
+        return
+
+    cfg = load_config()
+    rpc = RpcClient(
+        host=cfg.rpc_host,
+        port=cfg.rpc_port,
+        user=cfg.rpc_user,
+        password=cfg.rpc_password,
+    )
+
+    # Node-Health prüfen
+    health = node_health_check(rpc)
+    if not health["ok"]:
+        print(f"[ERROR] Node-Health-Check fehlgeschlagen: {health['error']}")
+        print("[HINT] Backend wird NICHT gestartet, bis Node bereit ist.")
+        return
+
+    # Genesis-Daten erzeugen
+    genesis_data = {
+        "genesis_timestamp": datetime.utcnow().isoformat() + "Z",
+        "node_version": rpc._request("getnetworkinfo", {}).get("subversion", "unknown"),
+        "initial_block_height": health.get("block_height"),
+        "config_hash": hash_file(BACKEND_CONFIG),
+        "ui_version": load_ui_version(),
+        "note": "Diese Datei wird nur einmal erzeugt und niemals überschrieben."
+    }
+
+    with GENESIS_FILE.open("w", encoding="utf-8") as f:
+        json.dump(genesis_data, f, indent=2)
+
+    print("[INFO] genesis.json erfolgreich erzeugt.")
+    print(f"[INFO] Genesis-Zeit: {genesis_data['genesis_timestamp']}")
+    print(f"[INFO] Node-Version: {genesis_data['node_version']}")
+    print(f"[INFO] Start-Blockhöhe: {genesis_data['initial_block_height']}")
+
+
+if __name__ == "__main__":
+    main()
+```
 
 ---
 
@@ -1262,7 +1647,8 @@ Zum Frontend-UI-Projekt das 1:1 passende Backend-Projekt als eigenen Ordnerblock
 
 
 ## run_build.py — FINAL, AUTONOM, PRODUKTIONSREIF
-
+```
+"""
 - gesamter Build‑Prozess autonomisiert
 - PowerShell korrekt startbar
 - Schritt 1 (Struktur‑Generator) führt autonom aus
@@ -1290,7 +1676,6 @@ WICHTIG:
 - Kein Start/Stop von Backend-Prozessen
 - Nur Build + Deploy + Metadaten
 """
-```python
 import subprocess
 import sys
 import os
