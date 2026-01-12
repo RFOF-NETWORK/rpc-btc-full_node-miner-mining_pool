@@ -2294,30 +2294,716 @@ if name == "main":
 
 -------------------------
 
-c / c++ platzhalter
+c / c++ core
 
 -------------------------
 Write-TextFile "$ROOT/src/c/hashing.c" @'
-/*
+/* ============================================================
  * hashing.c
- * Platzhalter für double-SHA256, Merkle-Root-Berechnung usw.
+ * SHA256 + double-SHA256 + Merkle + Wallet + Assembler +
+ * Quantum-Parity + Mining + Reward
+ * ============================================================
  */
 
-include <stdint.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
 
-void dummyhash(const uint8t in, uint8_t out) {
-    (void)in;
-    (void)out;
+#define SHA256_DIGEST_LENGTH 32
+#define RIPEMD160_DIGEST_LENGTH 20
+
+/* ============================================================
+ * 1) SHA-256 Grundmodul
+ * ============================================================
+ */
+
+typedef struct {
+    uint32_t state[8];
+    uint64_t bitlen;
+    uint8_t buffer[64];
+    size_t buffer_len;
+} sha256_ctx;
+
+static const uint32_t sha256_init_state[8] = {
+    0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+    0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
+};
+
+static const uint32_t K[64] = {
+    0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,
+    0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
+    0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,
+    0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,
+    0xe49b69c1u,0xefbe4786u,0x0fc19dc6u,0x240ca1ccu,
+    0x2de92c6fu,0x4a7484aau,0x5cb0a9dcu,0x76f988dau,
+    0x983e5152u,0xa831c66du,0xb00327c8u,0xbf597fc7u,
+    0xc6e00bf3u,0xd5a79147u,0x06ca6351u,0x14292967u,
+    0x27b70a85u,0x2e1b2138u,0x4d2c6dfcu,0x53380d13u,
+    0x650a7354u,0x766a0abbu,0x81c2c92eu,0x92722c85u,
+    0xa2bfe8a1u,0xa81a664bu,0xc24b8b70u,0xc76c51a3u,
+    0xd192e819u,0xd6990624u,0xf40e3585u,0x106aa070u,
+    0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,
+    0x391c0cb3u,0x4ed8aa4au,0x5b9cca4fu,0x682e6ff3u,
+    0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,
+    0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u
+};
+
+static uint32_t rotr32(uint32_t x, uint32_t n){return (x>>n)|(x<<(32u-n));}
+static uint32_t ch(uint32_t x,uint32_t y,uint32_t z){return (x&y)^(~x&z);}
+static uint32_t maj(uint32_t x,uint32_t y,uint32_t z){return (x&y)^(x&z)^(y&z);}
+static uint32_t big_sigma0(uint32_t x){return rotr32(x,2)^rotr32(x,13)^rotr32(x,22);}
+static uint32_t big_sigma1(uint32_t x){return rotr32(x,6)^rotr32(x,11)^rotr32(x,25);}
+static uint32_t small_sigma0(uint32_t x){return rotr32(x,7)^rotr32(x,18)^(x>>3);}
+static uint32_t small_sigma1(uint32_t x){return rotr32(x,17)^rotr32(x,19)^(x>>10);}
+
+
+/* ============================================================
+ * 2) SHA-256 Transformation / Padding / Final
+ * ============================================================
+ */
+
+static void sha256_transform(sha256_ctx *ctx,const uint8_t block[64]){
+    uint32_t w[64],a,b,c,d,e,f,g,h;
+
+    for(size_t i=0;i<16;i++){
+        size_t j=i*4;
+        w[i]=((uint32_t)block[j]<<24)|((uint32_t)block[j+1]<<16)|
+             ((uint32_t)block[j+2]<<8)|((uint32_t)block[j+3]);
+    }
+    for(size_t i=16;i<64;i++)
+        w[i]=small_sigma1(w[i-2])+w[i-7]+small_sigma0(w[i-15])+w[i-16];
+
+    a=ctx->state[0];b=ctx->state[1];c=ctx->state[2];d=ctx->state[3];
+    e=ctx->state[4];f=ctx->state[5];g=ctx->state[6];h=ctx->state[7];
+
+    for(size_t i=0;i<64;i++){
+        uint32_t t1=h+big_sigma1(e)+ch(e,f,g)+K[i]+w[i];
+        uint32_t t2=big_sigma0(a)+maj(a,b,c);
+        h=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2;
+    }
+
+    ctx->state[0]+=a;ctx->state[1]+=b;ctx->state[2]+=c;ctx->state[3]+=d;
+    ctx->state[4]+=e;ctx->state[5]+=f;ctx->state[6]+=g;ctx->state[7]+=h;
 }
+
+static void sha256_init(sha256_ctx *ctx){
+    memcpy(ctx->state,sha256_init_state,sizeof(sha256_init_state));
+    ctx->bitlen=0;
+    ctx->buffer_len=0;
+}
+
+static void sha256_update(sha256_ctx *ctx,const uint8_t *data,size_t len){
+    size_t i=0;
+    while(i<len){
+        size_t space=64-ctx->buffer_len;
+        size_t to_copy=(len-i<space)?(len-i):space;
+        memcpy(ctx->buffer+ctx->buffer_len,data+i,to_copy);
+        ctx->buffer_len+=to_copy;
+        i+=to_copy;
+
+        if(ctx->buffer_len==64){
+            sha256_transform(ctx,ctx->buffer);
+            ctx->bitlen+=512;
+            ctx->buffer_len=0;
+        }
+    }
+}
+
+static void sha256_final(sha256_ctx *ctx,uint8_t out[SHA256_DIGEST_LENGTH]){
+    uint8_t pad[64];
+    size_t pad_len=0;
+
+    ctx->bitlen+=ctx->buffer_len*8;
+    pad[pad_len++]=0x80;
+
+    size_t mod=(ctx->buffer_len+1)%64;
+    size_t zeros=(mod<=56)?(56-mod):(56+(64-mod));
+
+    memset(pad+pad_len,0,zeros);
+    pad_len+=zeros;
+
+    sha256_update(ctx,pad,pad_len);
+
+    uint8_t len_bytes[8];
+    uint64_t bitlen=ctx->bitlen;
+
+    for(size_t i=0;i<8;i++){
+        len_bytes[7-i]=(uint8_t)(bitlen&0xffu);
+        bitlen>>=8;
+    }
+
+    sha256_update(ctx,len_bytes,8);
+
+    for(size_t i=0;i<8;i++){
+        out[i*4+0]=(uint8_t)((ctx->state[i]>>24)&0xffu);
+        out[i*4+1]=(uint8_t)((ctx->state[i]>>16)&0xffu);
+        out[i*4+2]=(uint8_t)((ctx->state[i]>>8)&0xffu);
+        out[i*4+3]=(uint8_t)(ctx->state[i]&0xffu);
+    }
+}
+
+
+/* ============================================================
+ * 3) SHA256 once / double-SHA256
+ * ============================================================
+ */
+
+void sha256_once(const uint8_t *data,size_t len,uint8_t out[SHA256_DIGEST_LENGTH]){
+    sha256_ctx ctx;
+    sha256_init(&ctx);
+    sha256_update(&ctx,data,len);
+    sha256_final(&ctx,out);
+}
+
+void double_sha256(const uint8_t *data,size_t len,uint8_t out[SHA256_DIGEST_LENGTH]){
+    uint8_t tmp[SHA256_DIGEST_LENGTH];
+    sha256_once(data,len,tmp);
+    sha256_once(tmp,SHA256_DIGEST_LENGTH,out);
+}
+
+
+/* ============================================================
+ * 4) Merkle-Combine (Hash(left||right))
+ * ============================================================
+ */
+
+void merkle_combine(const uint8_t left[32],
+                    const uint8_t right[32],
+                    uint8_t out[32]){
+    uint8_t buf[64];
+    memcpy(buf,left,32);
+    memcpy(buf+32,right,32);
+    double_sha256(buf,64,out);
+}
+
+
+/* ============================================================
+ * 5) Target-Vergleich + Blockheader-Hash
+ * ============================================================
+ */
+
+int compare_hash_bigendian(const uint8_t hash[32], const uint8_t target[32])
+{
+    for (size_t i = 0; i < 32; ++i) {
+        if (hash[i] < target[i]) return -1;
+        if (hash[i] > target[i]) return 1;
+    }
+    return 0;
+}
+
+int hash_meets_target(const uint8_t hash[32], const uint8_t target[32])
+{
+    return compare_hash_bigendian(hash, target) <= 0;
+}
+
+void hash_block_header(const uint8_t header[80], uint8_t hash[32])
+{
+    double_sha256(header, 80, hash);
+}
+
+
+/* ============================================================
+ * 6) RIPEMD160 (vollständige Referenz-Implementierung)
+ *    Quelle: Public-Domain-ähnliche Referenz (leicht angepasst)
+ * ============================================================
+ */
+
+#define F1(x,y,z) ((x) ^ (y) ^ (z))
+#define F2(x,y,z) (((x) & (y)) | (~(x) & (z)))
+#define F3(x,y,z) (((x) | ~(y)) ^ (z))
+#define F4(x,y,z) (((x) & (z)) | ((y) & ~(z)))
+#define F5(x,y,z) ((x) ^ ((y) | ~(z)))
+
+static uint32_t rol32(uint32_t x, uint32_t n) { return (x << n) | (x >> (32 - n)); }
+
+static const uint32_t RL[80] = {
+    11,14,15,12,5,8,7,9,11,13,14,15,6,7,9,8,
+    7,6,8,13,11,9,7,15,7,12,15,9,11,7,13,12,
+    11,13,6,7,14,9,13,15,14,8,13,6,5,12,7,5,
+    11,12,14,15,14,15,9,8,9,14,5,6,8,6,5,12,
+    9,15,5,11,6,8,13,12,5,12,13,14,11,8,5,6
+};
+static const uint32_t RR[80] = {
+    8,9,9,11,13,15,15,5,7,7,8,11,14,14,12,6,
+    9,13,15,7,12,8,9,11,7,7,12,7,6,15,13,11,
+    9,7,15,11,8,6,6,14,12,13,5,14,13,13,7,5,
+    15,5,8,11,14,14,6,14,6,9,12,9,12,5,15,8,
+    8,5,12,9,12,5,14,6,8,13,6,5,15,13,11,11
+};
+static const uint32_t KL[5] = {0x00000000,0x5A827999,0x6ED9EBA1,0x8F1BBCDC,0xA953FD4E};
+static const uint32_t KR[5] = {0x50A28BE6,0x5C4DD124,0x6D703EF3,0x7A6D76E9,0x00000000};
+static const uint32_t SL[80] = {
+    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+    7,4,13,1,10,6,15,3,12,0,9,5,2,14,11,8,
+    3,10,14,4,9,15,8,1,2,7,0,6,13,11,5,12,
+    1,9,11,10,0,8,12,4,13,3,7,15,14,5,6,2,
+    4,0,5,9,7,12,2,10,14,1,3,8,11,6,15,13
+};
+static const uint32_t SR[80] = {
+    5,14,7,0,9,2,11,4,13,6,15,8,1,10,3,12,
+    6,11,3,7,0,13,5,10,14,15,8,12,4,9,1,2,
+    15,5,1,3,7,14,6,9,11,8,12,2,10,0,13,4,
+    8,6,4,1,3,11,15,0,5,12,2,13,9,7,10,14,
+    12,15,10,4,1,5,8,7,6,2,13,14,0,3,9,11
+};
+
+static void ripemd160_compress(uint32_t state[5], const uint8_t block[64])
+{
+    uint32_t X[16];
+    for (int i = 0; i < 16; ++i) {
+        X[i] =  (uint32_t)block[4*i] |
+               ((uint32_t)block[4*i+1] << 8) |
+               ((uint32_t)block[4*i+2] << 16) |
+               ((uint32_t)block[4*i+3] << 24);
+    }
+
+    uint32_t al = state[0], bl = state[1], cl = state[2], dl = state[3], el = state[4];
+    uint32_t ar = state[0], br = state[1], cr = state[2], dr = state[3], er = state[4];
+
+    for (int i = 0; i < 80; ++i) {
+        uint32_t t;
+        uint32_t r = SL[i];
+        uint32_t s = RL[i];
+
+        uint32_t f;
+        int j = i / 16;
+        switch (j) {
+            case 0: f = F1(bl,cl,dl); break;
+            case 1: f = F2(bl,cl,dl); break;
+            case 2: f = F3(bl,cl,dl); break;
+            case 3: f = F4(bl,cl,dl); break;
+            default: f = F5(bl,cl,dl); break;
+        }
+
+        t = rol32(al + f + X[r] + KL[j], s) + el;
+        al = el; el = dl; dl = rol32(cl,10); cl = bl; bl = t;
+
+        r = SR[i];
+        s = RR[i];
+
+        switch (j) {
+            case 0: f = F5(br,cr,dr); break;
+            case 1: f = F4(br,cr,dr); break;
+            case 2: f = F3(br,cr,dr); break;
+            case 3: f = F2(br,cr,dr); break;
+            default: f = F1(br,cr,dr); break;
+        }
+
+        t = rol32(ar + f + X[r] + KR[j], s) + er;
+        ar = er; er = dr; dr = rol32(cr,10); cr = br; br = t;
+    }
+
+    uint32_t t = state[1] + cl + dr;
+    state[1] = state[2] + dl + er;
+    state[2] = state[3] + el + ar;
+    state[3] = state[4] + al + br;
+    state[4] = state[0] + bl + cr;
+    state[0] = t;
+}
+
+void ripemd160(const uint8_t *msg, size_t len, uint8_t out[20])
+{
+    uint32_t state[5] = {
+        0x67452301u,
+        0xEFCDAB89u,
+        0x98BADCFEu,
+        0x10325476u,
+        0xC3D2E1F0u
+    };
+
+    uint64_t bitlen = (uint64_t)len * 8;
+    size_t full = len & ~((size_t)63);
+
+    for (size_t i = 0; i < full; i += 64) {
+        ripemd160_compress(state, msg + i);
+    }
+
+    uint8_t block[64];
+    size_t rem = len - full;
+    memset(block, 0, 64);
+    if (rem) memcpy(block, msg + full, rem);
+    block[rem] = 0x80;
+
+    if (rem >= 56) {
+        ripemd160_compress(state, block);
+        memset(block, 0, 64);
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        block[56 + i] = (uint8_t)((bitlen >> (8 * i)) & 0xffu);
+    }
+
+    ripemd160_compress(state, block);
+
+    for (int i = 0; i < 5; ++i) {
+        out[4*i+0] = (uint8_t)(state[i] & 0xffu);
+        out[4*i+1] = (uint8_t)((state[i] >> 8) & 0xffu);
+        out[4*i+2] = (uint8_t)((state[i] >> 16) & 0xffu);
+        out[4*i+3] = (uint8_t)((state[i] >> 24) & 0xffu);
+    }
+}
+
+
+/* ============================================================
+ * 7) HASH160 = RIPEMD160(SHA256(data))
+ * ============================================================
+ */
+
+void hash160(const uint8_t *data, size_t len, uint8_t out[20])
+{
+    uint8_t sha[32];
+    sha256_once(data, len, sha);
+    ripemd160(sha, 32, out);
+}
+
+
+/* ============================================================
+ * 8) TXID / WTXID / Merkle-Root (Block-Assembler)
+ * ============================================================
+ */
+
+void hash_txid(const uint8_t *tx, size_t len, uint8_t out[32])
+{
+    double_sha256(tx, len, out);
+}
+
+void hash_wtxid(const uint8_t *tx, size_t len, uint8_t out[32])
+{
+    double_sha256(tx, len, out);
+}
+
+void merkle_root_from_txids(const uint8_t *txids, size_t count, uint8_t out[32])
+{
+    if (count == 0) {
+        memset(out, 0, 32);
+        return;
+    }
+
+    uint8_t layer[count][32];
+    for (size_t i = 0; i < count; ++i)
+        memcpy(layer[i], txids + i*32, 32);
+
+    uint8_t buf[64];
+    size_t n = count;
+
+    while (n > 1) {
+        size_t next = 0;
+        for (size_t i = 0; i < n; i += 2) {
+            uint8_t *L = layer[i];
+            uint8_t *R = (i+1 < n) ? layer[i+1] : layer[i];
+            memcpy(buf, L, 32);
+            memcpy(buf+32, R, 32);
+            double_sha256(buf, 64, layer[next]);
+            next++;
+        }
+        n = next;
+    }
+
+    memcpy(out, layer[0], 32);
+}
+
+
+/* ============================================================
+ * 9) Quantum-Parity-Hilfsfunktionen
+ * ============================================================
+ */
+
+uint32_t extract_parity_bits(const uint8_t hash[32], uint32_t bits)
+{
+    uint32_t out = 0;
+    for (uint32_t i = 0; i < bits; i++) {
+        uint32_t byte = i / 8;
+        uint32_t bit  = i % 8;
+        uint32_t v = (hash[31 - byte] >> bit) & 1u;
+        out |= (v << i);
+    }
+    return out;
+}
+
+uint32_t map_hash_to_shard(const uint8_t hash[32], uint32_t shard_count)
+{
+    uint32_t v = extract_parity_bits(hash, 16);
+    return (shard_count == 0) ? 0 : (v % shard_count);
+}
+
+
+/* ============================================================
+ * 10) Mining-Unterstützung (Nonce-Hash + FPS-Cost)
+ * ============================================================
+ */
+
+void hash_with_nonce(const uint8_t header[80], uint32_t nonce, uint8_t out[32])
+{
+    uint8_t buf[80];
+    memcpy(buf, header, 80);
+    buf[76] = (uint8_t)(nonce & 0xffu);
+    buf[77] = (uint8_t)((nonce >> 8) & 0xffu);
+    buf[78] = (uint8_t)((nonce >> 16) & 0xffu);
+    buf[79] = (uint8_t)((nonce >> 24) & 0xffu);
+    double_sha256(buf, 80, out);
+}
+
+uint64_t hash_compute_cost(size_t hashes)
+{
+    return (uint64_t)hashes; /* 1 Hash = 1 FPS */
+}
+
+
+/* ============================================================
+ * 11) Reward-Engine-Hashing
+ * ============================================================
+ */
+
+void hash_coinbase_tx(const uint8_t *tx, size_t len, uint8_t out[32])
+{
+    double_sha256(tx, len, out);
+}
+
+void hash_extranonce(const uint8_t *data, size_t len, uint8_t out[32])
+{
+    sha256_once(data, len, out);
+}
+
+
+/* ============================================================
+ * Ende der Datei
+ * ============================================================
+ */
 '@
 
 Write-TextFile "$ROOT/src/cpp/validator.cpp" @'
+// ============================================================
 // validator.cpp
-// Platzhalter für Share-Validierung und Job-Engine.
+// VNM + Shard + Nonce + Mining-Loop + Mining-Engine +
+// Wallet/Assembler/Parity/Reward-Kompatibilität
+// ============================================================
 
-int main() {
-    return 0;
+#include <cstdint>
+#include <cstddef>
+#include <cstring>
+
+// ============================================================
+// C-Hashfunktionen aus hashing.c
+// ============================================================
+
+extern "C" {
+    void double_sha256(const uint8_t *data, size_t len, uint8_t out[32]);
+    int hash_meets_target(const uint8_t hash[32], const uint8_t target[32]);
+    void hash_block_header(const uint8_t header[80], uint8_t hash[32]);
+    void hash_with_nonce(const uint8_t header[80], uint32_t nonce, uint8_t out[32]);
+    uint32_t extract_parity_bits(const uint8_t hash[32], uint32_t bits);
+    uint32_t map_hash_to_shard(const uint8_t hash[32], uint32_t shard_count);
+    uint64_t hash_compute_cost(size_t hashes);
 }
+
+
+// ============================================================
+// 1) VNM-Modul (bestehend)
+// ============================================================
+
+struct VnmRange {
+    uint64_t nonce_start;
+    uint64_t nonce_end;
+    uint32_t shard_id;
+    uint32_t shard_count;
+};
+
+VnmRange compute_vnm_range_32(uint32_t shard_id, uint32_t shard_count)
+{
+    const uint64_t total = (uint64_t)1u << 32;
+    const uint64_t per_shard = total / shard_count;
+
+    VnmRange r;
+    r.shard_id = shard_id;
+    r.shard_count = shard_count;
+    r.nonce_start = (uint64_t)shard_id * per_shard;
+    r.nonce_end = r.nonce_start + per_shard;
+    return r;
+}
+
+
+// ============================================================
+// 2) Shard-Modul (bestehend)
+// ============================================================
+
+uint32_t shard_index(uint64_t nonce, uint32_t shard_count)
+{
+    return (uint32_t)(nonce % shard_count);
+}
+
+
+// ============================================================
+// 3) Nonce-Range-Modul (bestehend)
+// ============================================================
+
+bool nonce_in_range(uint64_t nonce, const VnmRange &range)
+{
+    return (nonce >= range.nonce_start && nonce < range.nonce_end);
+}
+
+
+// ============================================================
+// 4) BlockHeaderView (D2)
+// ============================================================
+
+struct BlockHeaderView {
+    uint8_t *data; // 80-Byte-Header
+};
+
+inline void set_header_nonce(BlockHeaderView &hdr, uint32_t nonce)
+{
+    hdr.data[76] = (uint8_t)(nonce & 0xffU);
+    hdr.data[77] = (uint8_t)((nonce >> 8) & 0xffU);
+    hdr.data[78] = (uint8_t)((nonce >> 16) & 0xffU);
+    hdr.data[79] = (uint8_t)((nonce >> 24) & 0xffU);
+}
+
+
+// ============================================================
+// 5) MiningResult (D3)
+// ============================================================
+
+struct MiningResult {
+    bool found;
+    uint32_t found_nonce;
+    uint8_t found_hash[32];
+    uint64_t hashes_computed;
+};
+
+
+// ============================================================
+// 6) Mining-Loop (D3)
+// ============================================================
+
+MiningResult mine_range(
+    BlockHeaderView &header,
+    const uint8_t target[32],
+    const VnmRange &range
+){
+    MiningResult res{};
+    res.found = false;
+    res.found_nonce = 0;
+    res.hashes_computed = 0;
+    std::memset(res.found_hash, 0, 32);
+
+    uint64_t start = range.nonce_start;
+    uint64_t end   = range.nonce_end;
+
+    if (end > ((uint64_t)1u << 32))
+        end = ((uint64_t)1u << 32);
+
+    for (uint64_t n = start; n < end; ++n) {
+        uint32_t nonce32 = (uint32_t)n;
+        set_header_nonce(header, nonce32);
+
+        uint8_t hash[32];
+        hash_block_header(header.data, hash);
+
+        res.hashes_computed++;
+
+        if (hash_meets_target(hash, target)) {
+            res.found = true;
+            res.found_nonce = nonce32;
+            std::memcpy(res.found_hash, hash, 32);
+            break;
+        }
+    }
+
+    return res;
+}
+
+
+// ============================================================
+// 7) MiningEngine (D6)
+// ============================================================
+
+class MiningEngine {
+public:
+    MiningEngine(uint32_t shard_id, uint32_t shard_count)
+        : range_(compute_vnm_range_32(shard_id, shard_count))
+    {}
+
+    MiningResult mine(BlockHeaderView &header, const uint8_t target[32]) {
+        return mine_range(header, target, range_);
+    }
+
+    const VnmRange &range() const { return range_; }
+
+private:
+    VnmRange range_;
+};
+
+
+// ============================================================
+// 8) Share-Validation (erweitert A+B+C+D+E)
+// ============================================================
+
+struct ShareContext {
+    const uint8_t *block_header; // 80 Bytes
+    size_t header_len;
+    const uint8_t *target;       // 32 Bytes
+    uint64_t nonce;
+    VnmRange vnm;
+
+    // Parity (C)
+    bool parity_enabled;
+    uint32_t parity_bits;
+
+    // Reward/Assembler (E/B)
+    bool assembler_enabled;
+    bool reward_enabled;
+};
+
+enum class ShareResult {
+    OK = 0,
+    INVALID_TARGET = 1,
+    INVALID_HASH = 2,
+    INVALID_NONCE_RANGE = 3,
+    INVALID_PARITY = 4,
+    INTERNAL_ERROR = 10
+};
+
+ShareResult validate_share(const ShareContext &ctx)
+{
+    if (!ctx.block_header || !ctx.target)
+        return ShareResult::INTERNAL_ERROR;
+
+    if (ctx.header_len != 80u)
+        return ShareResult::INVALID_HASH;
+
+    if (ctx.vnm.shard_count == 0u)
+        return ShareResult::INVALID_NONCE_RANGE;
+
+    if (!nonce_in_range(ctx.nonce, ctx.vnm))
+        return ShareResult::INVALID_NONCE_RANGE;
+
+    uint8_t hdr[80];
+    std::memcpy(hdr, ctx.block_header, 80);
+
+    BlockHeaderView view{hdr};
+    set_header_nonce(view, (uint32_t)ctx.nonce);
+
+    uint8_t hash[32];
+    hash_block_header(hdr, hash);
+
+    if (!hash_meets_target(hash, ctx.target))
+        return ShareResult::INVALID_HASH;
+
+    // Quantum-Parity (C)
+    if (ctx.parity_enabled) {
+        uint32_t p = extract_parity_bits(hash, ctx.parity_bits);
+        uint32_t shard = p % ctx.vnm.shard_count;
+        if (shard != ctx.vnm.shard_id)
+            return ShareResult::INVALID_PARITY;
+    }
+
+    return ShareResult::OK;
+}
+
+
+// ============================================================
+// Ende der Datei
+// ============================================================
 '@
 
 -------------------------
