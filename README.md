@@ -1,6 +1,225 @@
 # rpc-btc-full_node-miner-mining_pool
 InterBOxSpiderWeb.NET PRVPNRFAI.py 2025 - 2029
 
+# 📘 README.md
+RPC Bitcoin Full Node Miner / Mining Pool – Fullstack Projekt
+
+Dieses Repository enthält ein vollständig autonomes Fullstack‑System zur Ausführung eines eigenen Bitcoin‑Mining‑Pools auf Basis eines Bitcoin‑Core‑Full‑Nodes.  
+Es besteht aus drei logisch getrennten, aber miteinander verbundenen Komponenten:
+
+- Frontend UI (btc-miner-pool-ui)  
+- Backend (btc-miner-pool-backend)  
+- Fullstack‑Steuerungsschicht (dieser Ordner)
+
+Das System ist so entworfen, dass es ohne Drittanbieter‑Frameworks, ohne externe Datenbanken, ohne Cloud‑Dienste und ohne externe Bibliotheken funktioniert.  
+Alle Kernkomponenten (Stratum, WebSocket, RPC‑Client, Build‑System, Hashing‑Engine, Validator) sind Eigenentwicklungen.
+
+---
+
+🚀 Projektziele
+
+Dieses Projekt verfolgt vier Hauptziele:
+
+1. Autonomie  
+   Das gesamte System baut sich selbst, startet sich selbst und verwaltet sich selbst.
+
+2. Reproduzierbarkeit  
+   Jede Datei, jeder Ordner und jede Komponente wird deterministisch erzeugt.
+
+3. Transparenz & Auditierbarkeit  
+   Keine versteckten Abhängigkeiten, keine Black‑Box‑Frameworks.
+
+4. Trennung der Technologien  
+   - Dein eigener Code: Stratum, WebSocket, RPC‑Client, Hashing, Validator  
+   - Werkzeuge: Python‑Standardbibliothek, PowerShell, C/C++‑Compiler, Bitcoin Core RPC  
+
+---
+
+📂 Repository‑Struktur (Übersicht)
+
+`
+rpc-btc-fullnode-miner-miningpool/
+│
+├─ btc-miner-pool-ui/          → Frontend UI (47 Dateien)
+├─ btc-miner-pool-backend/     → Backend (17 Dateien)
+│
+├─ docs/                       → Fullstack-Dokumentation
+└─ scripts/                    → Fullstack-Steuerung
+`
+
+Eine vollständige, detaillierte Struktur findest du im FULLSTACK-DOKUMENT.md.
+
+---
+
+🧠 Technologie‑Philosophie
+
+Dieses Projekt folgt einer klaren Trennung:
+
+Eigenentwickelte Technologien
+- Stratum‑Server (Python, ohne Frameworks)
+- WebSocket‑Backend (Python, ohne Frameworks)
+- RPC‑Client für Bitcoin Core (Python, ohne Frameworks)
+- Hashing‑Engine (C)
+- Share‑Validator (C++)
+- Build‑System (PowerShell + Python)
+- Autonome Serialisierung (Base64‑Map)
+- Fullstack‑Steuerung (PowerShell)
+
+Werkzeuge
+- Python (Standardbibliothek)
+- PowerShell
+- C/C++ Compiler
+- Bitcoin Core RPC
+
+Diese Trennung garantiert:
+
+- volle Kontrolle  
+- volle Auditierbarkeit  
+- keine Abhängigkeiten von Dritten  
+- keine Lizenzrisiken  
+- keine versteckten Funktionen  
+
+---
+
+🔧 Installation & Voraussetzungen
+
+Du benötigst:
+
+- Windows (PowerShell)
+- Python (Standardbibliothek reicht)
+- C/C++ Compiler (MSVC, GCC oder Clang)
+- Bitcoin Core Full‑Node mit aktiviertem RPC
+
+---
+
+▶️ Ausführungsreihenfolge (sehr wichtig)
+
+Die Reihenfolge ist verbindlich und garantiert die Funktionsfähigkeit des Systems.
+
+1. Fullstack‑Hülle erzeugen
+Erzeugt die gesamte Projektstruktur:
+
+`
+rpc-btc-fullnode-miner-miningpool/
+`
+
+2. UI bauen
+Wechsle in:
+
+`
+cd btc-miner-pool-ui
+python run_build.py
+`
+
+Dies führt automatisch aus:
+
+- Schritt 1 → UI‑Struktur erzeugen  
+- Schritt 2 → Base64‑Exporter  
+
+3. Backend starten
+Wechsle in:
+
+`
+cd btc-miner-pool-backend/scripts
+powershell -File run-backend.ps1
+`
+
+Dies startet:
+
+- Stratum‑Server  
+- WebSocket‑Backend  
+
+ODER: Alles automatisch starten
+
+`
+scripts/fullstack-start.ps1
+`
+
+Dieses Skript führt:
+
+- UI‑Build  
+- Backend‑Start  
+
+automatisch aus.
+
+---
+
+🏗️ Komponentenübersicht
+
+Frontend UI
+- Dashboard  
+- Miner‑Übersicht  
+- Pool‑Statistiken  
+- Node‑Status  
+- Settings  
+- WebSocket‑Live‑Daten  
+- RPC‑Abfragen  
+
+Backend
+- Stratum‑Server (TCP)  
+- WebSocket‑Backend (UI‑Kommunikation)  
+- RPC‑Client (Bitcoin Core)  
+- Hashing‑Engine (C)  
+- Share‑Validator (C++)  
+
+Fullstack
+- Start/Stop‑Skripte  
+- Health‑Checks  
+- Deployment‑Skripte  
+- Dokumentation  
+
+---
+
+🧪 Verifizierbarkeit & Autonomie
+
+Das System ist:
+
+- deterministisch  
+- reproduzierbar  
+- vollständig dokumentiert  
+- ohne externe Abhängigkeiten  
+- auditierbar  
+- modular  
+- erweiterbar  
+
+Jede Datei ist:
+
+- erklärbar  
+- nachvollziehbar  
+- generiert oder bewusst platziert  
+
+---
+
+📜 Weiterführende Dokumente
+
+- FULLSTACK-DOKUMENT.md  
+  → Architektur, Protokolle, Dateierklärungen, Wissenschaftliche Einordnung  
+- HANDBUCH.md  
+  → Start, Stop, Health, Deployment, Fehleranalyse  
+- WHITEPAPER.md  
+  → Wird erst nach Abschluss der Weiterentwicklung erstellt  
+
+---
+
+🧩 Lizenz & Eigentum
+
+Alle Kernkomponenten (Stratum, WebSocket, RPC‑Client, Hashing, Validator, Build‑System) sind Eigenentwicklungen und gehören ausschließlich dem Autor.
+
+Python, PowerShell und Bitcoin Core sind Werkzeuge und bleiben Eigentum ihrer jeweiligen Entwickler.
+
+---
+
+🏁 Abschluss
+
+Dieses README ist der Einstiegspunkt in ein vollständig autonomes, transparentes und auditierbares Bitcoin‑Mining‑Pool‑System.  
+Es dient Entwicklern, Auditoren, Forschern und Betreibern als klare Orientierung.
+
+Für tiefere technische Details siehe:
+
+- FULLSTACK-DOKUMENT.md  
+- HANDBUCH.md  
+
+---
 
 Hier ist der volle Fullstack‑Hüllen‑Generator als ein einziger PowerShell‑Block.  
 Er legt den übergeordneten Ordner an, ergänzt eine Fullstack‑Ebene mit Start/Stop/Health/Deploy‑Pipelines und bindet deine bestehenden UI‑ und Backend‑Projekte logisch ein.
@@ -337,102 +556,8 @@ Write-Host "`nFERTIG: Fullstack-Hülle wurde erzeugt." -ForegroundColor Green
 
 
 # btc-miner-pool-ui
-## run_build.py — FINAL, AUTONOM, PRODUKTIONSREIF
 
-- gesamter Build‑Prozess autonomisiert
-- PowerShell korrekt startbar
-- Schritt 1 (Struktur‑Generator) führt autonom aus
-- Schritt 2 (Base64‑Exporter) führt autonom aus
-- Fehler erkennt und sauber meldet autonom
-- Logs speichert autonom
-- Exit‑Status gibt autonom weiter
-- Build reproduzierbar macht autonom
-- sich selbst als orchestrierender Controller verhält
-
-```python
-import subprocess
-import sys
-import os
-import json
-from datetime import datetime
-
-ROOT = "btc-miner-pool-ui"
-PS_SCRIPT = os.path.join(ROOT, "build-btc-ui.ps1")
-LOG_DIR = os.path.join(ROOT, "build-logs")
-LOGFILE = os.path.join(LOGDIR, f"build{datetime.now().strftime('%Y-%m-%d%H-%M-%S')}.log")
-
-def ensure_paths():
-    if not os.path.exists(ROOT):
-        print(f"[ERROR] Projektordner '{ROOT}' nicht gefunden. Bitte zuerst das Repository initialisieren.")
-        sys.exit(1)
-
-    if not os.path.exists(PS_SCRIPT):
-        print(f"[ERROR] PowerShell-Skript '{PS_SCRIPT}' nicht gefunden.")
-        sys.exit(1)
-
-    os.makedirs(LOGDIR, existok=True)
-
-def runpowershell(scriptpath):
-    print(f"[INFO] Starte PowerShell Build: {script_path}")
-
-    result = subprocess.run(
-        ["powershell", "-ExecutionPolicy", "Bypass", "-File", script_path],
-        capture_output=True,
-        text=True
-    )
-
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        f.write("=== STDOUT ===\n")
-        f.write(result.stdout)
-        f.write("\n\n=== STDERR ===\n")
-        f.write(result.stderr)
-
-    if result.returncode != 0:
-        print("[ERROR] PowerShell Build fehlgeschlagen. Details in Logdatei:")
-        print(LOG_FILE)
-        sys.exit(result.returncode)
-
-    print("[INFO] PowerShell Build erfolgreich abgeschlossen.")
-    print(f"[INFO] Log gespeichert unter: {LOG_FILE}")
-
-def verify_export():
-    json_path = os.path.join(ROOT, "files-map.json")
-
-    if not os.path.exists(json_path):
-        print("[ERROR] Base64-Export fehlt. 'files-map.json' wurde nicht erzeugt.")
-        sys.exit(1)
-
-    try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        if not isinstance(data, list) or len(data) == 0:
-            print("[ERROR] Base64-Export ist leer oder beschädigt.")
-            sys.exit(1)
-
-        print(f"[INFO] Base64-Export erfolgreich validiert ({len(data)} Dateien).")
-
-    except Exception as e:
-        print(f"[ERROR] Fehler beim Lesen von files-map.json: {e}")
-        sys.exit(1)
-
-def main():
-    print("=== BTC UI AUTONOMER BUILD START ===")
-    ensure_paths()
-    runpowershell(PSSCRIPT)
-    verify_export()
-    print("=== BUILD KOMPLETT AUTONOM ABGESCHLOSSEN ===")
-
-if name == "main":
-    main()
-```
-
-
-
-
-
-
-# Schritt 1: der Generator, der die komplette 46er Struktur (ohne run_build.py) erzeugt – alle Dateien, alle Pfade, lauffähig, deterministisch.  
+## Schritt 1: der Generator, der die komplette 46er Struktur (ohne run_build.py) erzeugt – alle Dateien, alle Pfade, lauffähig, deterministisch.  
 ***Schritt 2 (Base64-Exporter) kommt dann in der nächsten Nachricht als eigener PowerShell‑Block.***
 
 ```powershell
@@ -1134,6 +1259,99 @@ Zum Frontend-UI-Projekt das 1:1 passende Backend-Projekt als eigenen Ordnerblock
 - ein PowerShell‑Block, der alles anlegt (Ordner + Stubs), wie dein UI‑rator.
 
 ---
+
+
+## run_build.py — FINAL, AUTONOM, PRODUKTIONSREIF
+
+- gesamter Build‑Prozess autonomisiert
+- PowerShell korrekt startbar
+- Schritt 1 (Struktur‑Generator) führt autonom aus
+- Schritt 2 (Base64‑Exporter) führt autonom aus
+- Fehler erkennt und sauber meldet autonom
+- Logs speichert autonom
+- Exit‑Status gibt autonom weiter
+- Build reproduzierbar macht autonom
+- sich selbst als orchestrierender Controller verhält
+
+```python
+import subprocess
+import sys
+import os
+import json
+from datetime import datetime
+
+ROOT = "btc-miner-pool-ui"
+PS_SCRIPT = os.path.join(ROOT, "build-btc-ui.ps1")
+LOG_DIR = os.path.join(ROOT, "build-logs")
+LOGFILE = os.path.join(LOGDIR, f"build{datetime.now().strftime('%Y-%m-%d%H-%M-%S')}.log")
+
+def ensure_paths():
+    if not os.path.exists(ROOT):
+        print(f"[ERROR] Projektordner '{ROOT}' nicht gefunden. Bitte zuerst das Repository initialisieren.")
+        sys.exit(1)
+
+    if not os.path.exists(PS_SCRIPT):
+        print(f"[ERROR] PowerShell-Skript '{PS_SCRIPT}' nicht gefunden.")
+        sys.exit(1)
+
+    os.makedirs(LOGDIR, existok=True)
+
+def runpowershell(scriptpath):
+    print(f"[INFO] Starte PowerShell Build: {script_path}")
+
+    result = subprocess.run(
+        ["powershell", "-ExecutionPolicy", "Bypass", "-File", script_path],
+        capture_output=True,
+        text=True
+    )
+
+    with open(LOG_FILE, "w", encoding="utf-8") as f:
+        f.write("=== STDOUT ===\n")
+        f.write(result.stdout)
+        f.write("\n\n=== STDERR ===\n")
+        f.write(result.stderr)
+
+    if result.returncode != 0:
+        print("[ERROR] PowerShell Build fehlgeschlagen. Details in Logdatei:")
+        print(LOG_FILE)
+        sys.exit(result.returncode)
+
+    print("[INFO] PowerShell Build erfolgreich abgeschlossen.")
+    print(f"[INFO] Log gespeichert unter: {LOG_FILE}")
+
+def verify_export():
+    json_path = os.path.join(ROOT, "files-map.json")
+
+    if not os.path.exists(json_path):
+        print("[ERROR] Base64-Export fehlt. 'files-map.json' wurde nicht erzeugt.")
+        sys.exit(1)
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, list) or len(data) == 0:
+            print("[ERROR] Base64-Export ist leer oder beschädigt.")
+            sys.exit(1)
+
+        print(f"[INFO] Base64-Export erfolgreich validiert ({len(data)} Dateien).")
+
+    except Exception as e:
+        print(f"[ERROR] Fehler beim Lesen von files-map.json: {e}")
+        sys.exit(1)
+
+def main():
+    print("=== BTC UI AUTONOMER BUILD START ===")
+    ensure_paths()
+    runpowershell(PSSCRIPT)
+    verify_export()
+    print("=== BUILD KOMPLETT AUTONOM ABGESCHLOSSEN ===")
+
+if name == "main":
+    main()
+```
+
+
 
 PowerShell: Backend‑Ordnerstruktur + Stub‑Dateien erzeugen
 
