@@ -1454,40 +1454,429 @@ Write-TextFile "$ROOT/src/python/core/rpc_client.py" @'
 """
 RPC-Client für Bitcoin Core, ohne externe Bibliotheken.
 """
+# ============================================================
+# rpc_client.py
+# Vollwertiger, deterministischer RPC-Client + Byte/FPS-Logik
+# + D5: Mining-/Generating-/Difficulty-RPCs
+# + A: Wallet-RPC-Modul (Wallet-Integration)
+# ============================================================
 
 import http.client
 import json
 from base64 import b64encode
+from typing import Any, Dict, List, Optional
+
+# ============================================================
+# 1) SI-Byte-Modul
+# ============================================================
+
+SI_BYTE_EXPONENTS: Dict[str, int] = {
+    "qB": -30, "rB": -27, "yB": -24, "zB": -21, "aB": -18, "fB": -15,
+    "pB": -12, "nB": -9, "µB": -6, "mB": -3, "cB": -2, "dB": -1,
+    "B": 0,
+    "daB": 1, "hB": 2, "kB": 3, "MB": 6, "GB": 9, "TB": 12,
+    "PB": 15, "EB": 18, "ZB": 21, "YB": 24, "QB": 30,
+}
+
+def si_bytes(symbol: str) -> float:
+    exp = SI_BYTE_EXPONENTS.get(symbol)
+    if exp is None:
+        raise ValueError(f"Unbekanntes SI-Byte-Symbol: {symbol}")
+    return 10.0 ** exp
+
+
+# ============================================================
+# 2) Binär-Byte-Modul
+# ============================================================
+
+BIN_BYTE_EXPONENTS: Dict[str, int] = {
+    "QiB": 0, "RiB": 10, "YiB": 20, "ZiB": 30, "AiB": 40, "FiB": 50,
+    "PiB": 60, "NiB": 70, "µiB": 80, "miB": 90, "ciB": 100, "diB": 110,
+    "B": 120,
+    "daiB": 130, "hiB": 140, "KiB": 150, "MiB": 160, "GiB": 170,
+    "TiB": 180, "PiBiB": 190, "EiBiB": 200, "ZiBiB": 210,
+    "YiBiB": 220, "QiBiB": 230,
+}
+
+def bin_bytes(symbol: str) -> float:
+    exp = BIN_BYTE_EXPONENTS.get(symbol)
+    if exp is None:
+        raise ValueError(f"Unbekanntes Binär-Byte-Symbol: {symbol}")
+    return float(2 ** exp)
+
+
+# ============================================================
+# 3) FPS-Modul
+# ============================================================
+
+def fps_from_bytes(num_bytes: float) -> float:
+    return num_bytes
+
+def bytes_from_fps(fps: float) -> float:
+    return fps
+
+
+# ============================================================
+# 4) RPC-Transport-Modul
+# ============================================================
+
+class RpcError(Exception):
+    def __init__(self, message: str, code: Optional[int] = None, data: Any = None):
+        super().__init__(message)
+        self.code = code
+        self.data = data
 
 class RpcClient:
-    def init(self, host="127.0.0.1", port=8332, user="user", password="pass"):
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8332,
+        user: str = "user",
+        password: str = "pass",
+        timeout: int = 10
+    ) -> None:
         self.host = host
         self.port = port
+        self.timeout = timeout
         auth = f"{user}:{password}".encode("utf-8")
         self.auth_header = "Basic " + b64encode(auth).decode("utf-8")
 
-    def call(self, method, params=None):
+    def _request(self, method: str, params: Optional[List[Any]] = None) -> Any:
         if params is None:
             params = []
-        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
+
         payload = json.dumps({
             "jsonrpc": "1.0",
             "id": "btc-backend",
             "method": method,
-            "params": params
+            "params": params,
         })
+
         headers = {
             "Content-Type": "application/json",
-            "Authorization": self.auth_header
+            "Authorization": self.auth_header,
         }
-        conn.request("POST", "/", body=payload, headers=headers)
-        res = conn.getresponse()
+
+        try:
+            conn.request("POST", "/", body=payload, headers=headers)
+            res = conn.getresponse()
+        except OSError as e:
+            raise RuntimeError(f"RPC CONNECTION ERROR: {e}") from e
+
         if res.status != 200:
-            raise RuntimeError(f"RPC HTTP ERROR {res.status}")
-        data = json.loads(res.read().decode("utf-8"))
-        if data.get("error"):
-            raise RuntimeError(f"RPC CORE ERROR: {data['error']}")
-        return data["result"]
+            raise RuntimeError(f"RPC HTTP ERROR {res.status}: {res.reason}")
+
+        raw = res.read().decode("utf-8")
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"RPC JSON PARSE ERROR: {e}") from e
+
+        if data.get("error") is not None:
+            err = data["error"]
+            raise RpcError(
+                message=f"RPC CORE ERROR: {err}",
+                code=err.get("code"),
+                data=err.get("data"),
+            )
+
+        return data.get("result")
+
+    # ========================================================
+    # 5) Blockchain RPCs (bestehend)
+    # ========================================================
+
+    def get_blockchain_info(self) -> Any:
+        return self._request("getblockchaininfo")
+
+    def get_mining_info(self) -> Any:
+        return self._request("getmininginfo")
+
+    def get_network_hash_ps(self, nblocks: int = 120, height: int = -1) -> Any:
+        return self._request("getnetworkhashps", [nblocks, height])
+
+    def get_block_template(self, template_request: Optional[dict] = None) -> Any:
+        if template_request is None:
+            template_request = {}
+        return self._request("getblocktemplate", [template_request])
+
+    def submit_block(self, hexdata: str) -> Any:
+        return self._request("submitblock", [hexdata])
+
+    def get_block_header(self, blockhash: str, verbose: bool = True) -> Any:
+        return self._request("getblockheader", [blockhash, verbose])
+
+    def get_block(self, blockhash: str, verbosity: int = 1) -> Any:
+        return self._request("getblock", [blockhash, verbosity])
+
+    # ========================================================
+    # 6) D5: Mining-RPCs (NEU)
+    # ========================================================
+
+    def submitheader(self, hexdata: str) -> Any:
+        return self._request("submitheader", [hexdata])
+
+    def getdifficulty(self) -> Any:
+        return self._request("getdifficulty")
+
+    # ========================================================
+    # 7) D5: Generating-RPCs (NEU)
+    # ========================================================
+
+    def generateblock(self, output: str, transactions: List[str]) -> Any:
+        return self._request("generateblock", [output, transactions])
+
+    def generatetoaddress(self, nblocks: int, address: str) -> Any:
+        return self._request("generatetoaddress", [nblocks, address])
+
+    def generatetodescriptor(self, nblocks: int, descriptor: str) -> Any:
+        return self._request("generatetodescriptor", [nblocks, descriptor])
+
+    # ========================================================
+    # 8) A: Wallet-RPC-Modul (Wallet-Integration)
+    # ========================================================
+
+    # ---- Wallet-Management ----
+
+    def create_wallet(self, wallet_name: str, disable_private_keys: bool = False,
+                      blank: bool = False, passphrase: str = "",
+                      avoid_reuse: bool = False, descriptors: bool = False) -> Any:
+        return self._request("createwallet", [
+            wallet_name,
+            disable_private_keys,
+            blank,
+            passphrase,
+            avoid_reuse,
+            descriptors,
+        ])
+
+    def load_wallet(self, wallet_name: str) -> Any:
+        return self._request("loadwallet", [wallet_name])
+
+    def unload_wallet(self, wallet_name: str) -> Any:
+        return self._request("unloadwallet", [wallet_name])
+
+    def list_wallets(self) -> Any:
+        return self._request("listwallets")
+
+    def list_wallet_dir(self) -> Any:
+        return self._request("listwalletdir")
+
+    def get_wallet_info(self) -> Any:
+        return self._request("getwalletinfo")
+
+    # ---- Adressen & Labels ----
+
+    def get_new_address(self, label: str = "", address_type: Optional[str] = None) -> Any:
+        params: List[Any] = []
+        if label:
+            params.append(label)
+        if address_type is not None:
+            if not label:
+                params.append("")
+            params.append(address_type)
+        return self._request("getnewaddress", params)
+
+    def get_address_info(self, address: str) -> Any:
+        return self._request("getaddressinfo", [address])
+
+    def get_addresses_by_label(self, label: str) -> Any:
+        return self._request("getaddressesbylabel", [label])
+
+    def set_label(self, address: str, label: str) -> Any:
+        return self._request("setlabel", [address, label])
+
+    def list_labels(self, purpose: str = "") -> Any:
+        params: List[Any] = []
+        if purpose:
+            params.append(purpose)
+        return self._request("listlabels", params)
+
+    # ---- Guthaben ----
+
+    def get_balance(self, dummy: str = "*", minconf: int = 0, include_watchonly: bool = False) -> Any:
+        return self._request("getbalance", [dummy, minconf, include_watchonly])
+
+    def get_balances(self) -> Any:
+        return self._request("getbalances")
+
+    def get_unconfirmed_balance(self) -> Any:
+        return self._request("getunconfirmedbalance")
+
+    # ---- UTXOs ----
+
+    def list_unspent(self, minconf: int = 1, maxconf: int = 9999999,
+                     addresses: Optional[List[str]] = None,
+                     include_unsafe: bool = True,
+                     query_options: Optional[Dict[str, Any]] = None) -> Any:
+        if addresses is None:
+            addresses = []
+        if query_options is None:
+            query_options = {}
+        return self._request("listunspent", [
+            minconf,
+            maxconf,
+            addresses,
+            include_unsafe,
+            query_options,
+        ])
+
+    # ---- Senden ----
+
+    def send_to_address(self, address: str, amount: float,
+                        comment: str = "", comment_to: str = "",
+                        subtract_fee_from_amount: bool = False,
+                        replaceable: Optional[bool] = None,
+                        conf_target: Optional[int] = None,
+                        estimate_mode: Optional[str] = None) -> Any:
+        params: List[Any] = [address, amount, comment, comment_to, subtract_fee_from_amount]
+
+        # Optional-Parameter werden nur ergänzt, wenn gesetzt
+        if replaceable is not None:
+            params.append(replaceable)
+        if conf_target is not None:
+            # ggf. Platzhalter, falls replaceable nicht gesetzt war
+            while len(params) < 7:
+                params.append(None)
+            params.append(conf_target)
+        if estimate_mode is not None:
+            while len(params) < 8:
+                params.append(None)
+            params.append(estimate_mode)
+
+        return self._request("sendtoaddress", params)
+
+    def send_many(self, dummy: str, amounts: Dict[str, float],
+                  minconf: int = 1, comment: str = "",
+                  subtract_fee_from: Optional[List[str]] = None,
+                  replaceable: Optional[bool] = None,
+                  conf_target: Optional[int] = None,
+                  estimate_mode: Optional[str] = None) -> Any:
+        if subtract_fee_from is None:
+            subtract_fee_from = []
+
+        params: List[Any] = [dummy, amounts, minconf, comment, subtract_fee_from]
+
+        if replaceable is not None:
+            params.append(replaceable)
+        if conf_target is not None:
+            while len(params) < 7:
+                params.append(None)
+            params.append(conf_target)
+        if estimate_mode is not None:
+            while len(params) < 8:
+                params.append(None)
+            params.append(estimate_mode)
+
+        return self._request("sendmany", params)
+
+    # ---- Private Keys / Import / Export ----
+
+    def dump_privkey(self, address: str) -> Any:
+        return self._request("dumpprivkey", [address])
+
+    def import_privkey(self, privkey: str, label: str = "",
+                       rescan: bool = True) -> Any:
+        return self._request("importprivkey", [privkey, label, rescan])
+
+    def dump_wallet(self, filename: str) -> Any:
+        return self._request("dumpwallet", [filename])
+
+    def import_wallet(self, filename: str) -> Any:
+        return self._request("importwallet", [filename])
+
+    # ---- PSBT / Raw TX / Signatur ----
+
+    def create_raw_transaction(self, inputs: List[Dict[str, Any]],
+                               outputs: Dict[str, float],
+                               locktime: int = 0,
+                               replaceable: bool = False) -> Any:
+        return self._request("createrawtransaction", [inputs, outputs, locktime, replaceable])
+
+    def fund_raw_transaction(self, hexstring: str,
+                             options: Optional[Dict[str, Any]] = None,
+                             is_witness: Optional[bool] = None) -> Any:
+        params: List[Any] = [hexstring]
+        if options is not None:
+            params.append(options)
+        if is_witness is not None:
+            while len(params) < 2:
+                params.append({})
+            params.append(is_witness)
+        return self._request("fundrawtransaction", params)
+
+    def sign_raw_transaction_with_wallet(self, hexstring: str,
+                                         prevtxs: Optional[List[Dict[str, Any]]] = None,
+                                         sighashtype: str = "ALL") -> Any:
+        if prevtxs is None:
+            prevtxs = []
+        return self._request("signrawtransactionwithwallet", [hexstring, prevtxs, sighashtype])
+
+    def send_raw_transaction(self, hexstring: str, maxfeerate: str = "0.10") -> Any:
+        return self._request("sendrawtransaction", [hexstring, maxfeerate])
+# ---- PSBT / Nachrichten / Validierung ----
+
+    def analyze_psbt(self, psbt: str) -> Any:
+        return self._request("analyzepsbt", [psbt])
+
+    def decode_psbt(self, psbt: str) -> Any:
+        return self._request("decodepsbt", [psbt])
+
+    def finalize_psbt(self, psbt: str, extract: bool = True) -> Any:
+        return self._request("finalizepsbt", [psbt, extract])
+
+    def wallet_create_funded_psbt(
+        self,
+        inputs: List[Dict[str, Any]],
+        outputs: List[Dict[str, Any]],
+        locktime: int = 0,
+        options: Optional[Dict[str, Any]] = None,
+        bip32derivs: bool = True,
+    ) -> Any:
+        if options is None:
+            options = {}
+        return self._request(
+            "walletcreatefundedpsbt",
+            [inputs, outputs, locktime, options, bip32derivs],
+        )
+
+    # ---- Wallet-Sicherheit / Passphrase ----
+
+    def encrypt_wallet(self, passphrase: str) -> Any:
+        return self._request("encryptwallet", [passphrase])
+
+    def wallet_passphrase(self, passphrase: str, timeout: int) -> Any:
+        return self._request("walletpassphrase", [passphrase, timeout])
+
+    def wallet_lock(self) -> Any:
+        return self._request("walletlock")
+
+    def wallet_passphrase_change(self, old_passphrase: str, new_passphrase: str) -> Any:
+        return self._request("walletpassphrasechange", [old_passphrase, new_passphrase])
+
+    # ---- Nachrichten signieren / prüfen ----
+
+    def sign_message(self, address: str, message: str) -> Any:
+        return self._request("signmessage", [address, message])
+
+    def sign_message_with_privkey(self, privkey: str, message: str) -> Any:
+        return self._request("signmessagewithprivkey", [privkey, message])
+
+    def verify_message(self, address: str, signature: str, message: str) -> Any:
+        return self._request("verifymessage", [address, signature, message])
+
+    # ---- Address-Validierung ----
+
+    def validate_address(self, address: str) -> Any:
+        return self._request("validateaddress", [address])
+
+
+# ============================================================
+# Ende der PowerShell Code Datei
+# ============================================================
 '@
 
 Write-TextFile "$ROOT/src/python/core/config.py" @'
@@ -1495,15 +1884,199 @@ Write-TextFile "$ROOT/src/python/core/config.py" @'
 Konfiguration für Backend-Komponenten.
 """
 
+# ============================================================
+# config.py
+# Backend-Konfiguration + FPS-Tresor + Mining + Wallet + Parity
+# ============================================================
+
 import json
 import os
+from dataclasses import dataclass
+from typing import Any, Dict
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(file), "..", "..", ".."))
+# ============================================================
+# 1) Pfad-Modul
+# ============================================================
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 CONFIG_PATH = os.path.join(ROOT, "config", "backend.json")
 
-def load_config():
+
+# ============================================================
+# 2) Skalen-Referenz-Modul
+# ============================================================
+
+try:
+    from src.python.core.rpc_client import (
+        SI_BYTE_EXPONENTS,
+        BIN_BYTE_EXPONENTS,
+        si_bytes,
+        bin_bytes,
+        fps_from_bytes,
+        bytes_from_fps,
+    )
+except Exception:
+    SI_BYTE_EXPONENTS = {}
+    BIN_BYTE_EXPONENTS = {}
+    def si_bytes(symbol: str): raise RuntimeError("rpc_client.py nicht geladen")
+    def bin_bytes(symbol: str): raise RuntimeError("rpc_client.py nicht geladen")
+    def fps_from_bytes(x: float): raise RuntimeError("rpc_client.py nicht geladen")
+    def bytes_from_fps(x: float): raise RuntimeError("rpc_client.py nicht geladen")
+
+
+# ============================================================
+# 3) FPS-Tresor-Modul
+# ============================================================
+
+FPS_TREASURY_DEFAULT_PATH = os.path.join(ROOT, "data", "fps_treasury.json")
+
+def ensure_fps_treasury_exists(path: str) -> None:
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"total_fps": 0, "entries": []}, f, indent=2)
+
+
+# ============================================================
+# 4) Backend-Konfigurations-Modul (A+B+C+D+E integriert)
+# ============================================================
+
+@dataclass
+class BackendConfig:
+    # RPC
+    rpc_host: str
+    rpc_port: int
+    rpc_user: str
+    rpc_password: str
+
+    # Network
+    network: str
+
+    # Wallet (A)
+    wallet_enabled: bool
+    wallet_name: str
+    wallet_autoload: bool
+    wallet_autocreate: bool
+    wallet_mnemonic_enabled: bool
+
+    # Mining (D)
+    mining_enabled: bool
+    mining_threads: int
+    mining_shards: int
+    mining_shard_id: int
+
+    # Quantum-Parity (C)
+    parity_enabled: bool
+    parity_mode: str
+    vnm_bits: int
+
+    # Block Assembler (B)
+    assembler_enabled: bool
+    assembler_merkle_mode: str
+    assembler_txpool_path: str
+
+    # Reward Engine (E)
+    reward_address: str
+    reward_tag: str
+    reward_extranonce_size: int
+
+    # FPS
+    fps_enabled: bool
+    fps_treasury_path: str
+
+
+def _load_raw_config() -> Dict[str, Any]:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_config() -> BackendConfig:
+    data = _load_raw_config()
+
+    rpc = data.get("rpc", {})
+    wallet = data.get("wallet", {})
+    mining = data.get("mining", {})
+    parity = data.get("parity", {})
+    assembler = data.get("assembler", {})
+    reward = data.get("reward", {})
+    fps = data.get("fps", {})
+
+    cfg = BackendConfig(
+        # RPC
+        rpc_host=rpc.get("host", "127.0.0.1"),
+        rpc_port=int(rpc.get("port", 8332)),
+        rpc_user=rpc.get("user", "user"),
+        rpc_password=rpc.get("password", "pass"),
+
+        # Network
+        network=data.get("network", "mainnet"),
+
+        # Wallet (A)
+        wallet_enabled=bool(wallet.get("enabled", True)),
+        wallet_name=wallet.get("name", "default"),
+        wallet_autoload=bool(wallet.get("autoload", True)),
+        wallet_autocreate=bool(wallet.get("autocreate", True)),
+        wallet_mnemonic_enabled=bool(wallet.get("mnemonic_enabled", True)),
+
+        # Mining (D)
+        mining_enabled=bool(mining.get("enabled", False)),
+        mining_threads=int(mining.get("threads", 1)),
+        mining_shards=int(mining.get("shards", 1)),
+        mining_shard_id=int(mining.get("shard_id", 0)),
+
+        # Quantum-Parity (C)
+        parity_enabled=bool(parity.get("enabled", False)),
+        parity_mode=parity.get("mode", "standard"),
+        vnm_bits=int(parity.get("vnm_bits", 32)),
+
+        # Block Assembler (B)
+        assembler_enabled=bool(assembler.get("enabled", False)),
+        assembler_merkle_mode=assembler.get("merkle_mode", "standard"),
+        assembler_txpool_path=assembler.get("txpool_path", os.path.join(ROOT, "data", "txpool")),
+
+        # Reward Engine (E)
+        reward_address=reward.get("address", ""),
+        reward_tag=reward.get("tag", "COINBASE"),
+        reward_extranonce_size=int(reward.get("extranonce_size", 8)),
+
+        # FPS
+        fps_enabled=bool(fps.get("enabled", False)),
+        fps_treasury_path=fps.get("treasury_path", FPS_TREASURY_DEFAULT_PATH),
+    )
+
+    if cfg.fps_enabled:
+        ensure_fps_treasury_exists(cfg.fps_treasury_path)
+
+    return cfg
+
+
+# ============================================================
+# 5) FPS-Energie-Zähl-Modul (D)
+# ============================================================
+
+def update_fps_treasury(num_hashes: int) -> None:
+    cfg = load_config()
+    if not cfg.fps_enabled:
+        return
+
+    path = cfg.fps_treasury_path
+
+    if not os.path.exists(path):
+        ensure_fps_treasury_exists(path)
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    fps = fps_from_bytes(float(num_hashes))
+    data["total_fps"] = data.get("total_fps", 0) + fps
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+# ============================================================
+# Ende der Datei
+# ============================================================
 '@
 
 -------------------------
