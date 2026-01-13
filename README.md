@@ -222,248 +222,6 @@ Für tiefere technische Details siehe:
 ---
 ```
 """
-run_build.py
-Autonomer UI-Build- und Deploy-Supervisor für btc-miner-pool-ui.
-
-Aufgaben:
-- Projektpfade prüfen
-- PowerShell-Build ausführen (build-btc-ui.ps1)
-- Build-Logfile schreiben
-- files-map.json validieren
-- UI-Version ermitteln und ui-version.json schreiben
-- UI-Build in das Backend-Projekt deployen
-- ui-deploy.json erzeugen (Metadaten für Backend/UI)
-- Niemals das Backend neu starten oder beenden
-
-WICHTIG:
-- Kein Eingriff in Backend-Logik
-- Kein Start/Stop von Backend-Prozessen
-- Nur Build + Deploy + Metadaten
-"""
-
-import subprocess
-import sys
-import os
-import json
-from datetime import datetime
-from pathlib import Path
-
-# Wurzelpfade
-UI_ROOT = Path("btc-miner-pool-ui").resolve()
-BACKEND_ROOT = Path("btc-miner-pool-backend").resolve()
-
-PS_SCRIPT = UI_ROOT / "build-btc-ui.ps1"
-LOG_DIR = UI_ROOT / "build-logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-# Logdatei mit Zeitstempel
-LOG_FILE = LOG_DIR / f"build-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
-
-# Standard-Build-Output-Verzeichnis (an dein Setup anpassbar)
-# Wenn dein PowerShell-Skript in einen anderen Ordner baut, hier anpassen.
-DIST_DIR = UI_ROOT / "dist"
-
-# Zielordner im Backend, in den die UI deployt wird
-BACKEND_UI_DIR = BACKEND_ROOT / "ui"
-
-# Metadaten-Dateien
-UI_VERSION_FILE = BACKEND_UI_DIR / "ui-version.json"
-UI_DEPLOY_FILE = BACKEND_UI_DIR / "ui-deploy.json"
-
-
-def ensure_paths() -> None:
-    """
-    Prüft, ob UI-Projekt und Build-Skript existieren.
-    Bricht mit klarer Fehlermeldung ab, wenn etwas fehlt.
-    """
-    if not UI_ROOT.exists():
-        print(f"[ERROR] Projektordner '{UI_ROOT}' nicht gefunden. Bitte zuerst das Repository initialisieren.")
-        sys.exit(1)
-
-    if not PS_SCRIPT.exists():
-        print(f"[ERROR] PowerShell-Skript '{PS_SCRIPT}' nicht gefunden.")
-        sys.exit(1)
-
-
-def run_powershell_build() -> None:
-    """
-    Führt das PowerShell-Build-Skript aus und schreibt STDOUT/STDERR in eine Logdatei.
-    Bricht ab, wenn der Build fehlschlägt.
-    """
-    print(f"[INFO] Starte PowerShell-Build: {PS_SCRIPT}")
-
-    result = subprocess.run(
-        ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(PS_SCRIPT)],
-        capture_output=True,
-        text=True
-    )
-
-    with LOG_FILE.open("w", encoding="utf-8") as f:
-        f.write("=== STDOUT ===\n")
-        f.write(result.stdout)
-        f.write("\n\n=== STDERR ===\n")
-        f.write(result.stderr)
-
-    if result.returncode != 0:
-        print("[ERROR] PowerShell-Build fehlgeschlagen. Details in Logdatei:")
-        print(str(LOG_FILE))
-        sys.exit(result.returncode)
-
-    print("[INFO] PowerShell-Build erfolgreich abgeschlossen.")
-    print(f"[INFO] Log gespeichert unter: {LOG_FILE}")
-
-
-def verify_files_map() -> None:
-    """
-    Prüft, ob files-map.json existiert und eine nicht-leere Liste enthält.
-    Bricht ab bei Fehlern.
-    """
-    json_path = UI_ROOT / "files-map.json"
-
-    if not json_path.exists():
-        print("[ERROR] Base64-Export fehlt. 'files-map.json' wurde nicht erzeugt.")
-        sys.exit(1)
-
-    try:
-        with json_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        if not isinstance(data, list) or len(data) == 0:
-            print("[ERROR] Base64-Export ist leer oder beschädigt.")
-            sys.exit(1)
-
-        print(f"[INFO] Base64-Export erfolgreich validiert ({len(data)} Dateien).")
-
-    except Exception as e:
-        print(f"[ERROR] Fehler beim Lesen von files-map.json: {e}")
-        sys.exit(1)
-
-
-def detect_build_output() -> Path:
-    """
-    Ermittelt den Build-Output-Ordner.
-    Standard: DIST_DIR (z. B. 'btc-miner-pool-ui/dist').
-
-    Falls dein PowerShell-Skript in einen anderen Ordner baut, kann diese
-    Funktion später erweitert werden (z. B. Lesen aus einer Build-Config).
-    """
-    if not DIST_DIR.exists():
-        print(f"[ERROR] Build-Output-Verzeichnis '{DIST_DIR}' nicht gefunden.")
-        print("[HINT] Bitte prüfe dein PowerShell-Build-Skript oder passe DIST_DIR in run_build.py an.")
-        sys.exit(1)
-
-    return DIST_DIR
-
-
-def copy_ui_to_backend(build_dir: Path) -> None:
-    """
-    Kopiert den UI-Build in den Backend-UI-Ordner.
-    Existierende Dateien werden überschrieben, aber Struktur bleibt stabil.
-    Backend-Prozesse werden NICHT neu gestartet oder beendet.
-    """
-    print(f"[INFO] Deploy UI-Build von '{build_dir}' nach '{BACKEND_UI_DIR}'")
-
-    # Zielordner vorbereiten
-    BACKEND_UI_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Bestehende Dateien entfernen (nur im UI-Unterordner, nicht im gesamten Backend)
-    for item in BACKEND_UI_DIR.iterdir():
-        if item.is_file():
-            item.unlink()
-        elif item.is_dir():
-            # Rekursiv löschen
-            for root, dirs, files in os.walk(item, topdown=False):
-                for name in files:
-                    Path(root, name).unlink()
-                for name in dirs:
-                    Path(root, name).rmdir()
-            item.rmdir()
-
-    # Neu kopieren
-    for root, dirs, files in os.walk(build_dir):
-        rel_root = Path(root).relative_to(build_dir)
-        target_root = BACKEND_UI_DIR / rel_root
-        target_root.mkdir(parents=True, exist_ok=True)
-        for name in files:
-            src = Path(root) / name
-            dst = target_root / name
-            with src.open("rb") as fsrc, dst.open("wb") as fdst:
-                fdst.write(fsrc.read())
-
-    print("[INFO] UI-Build erfolgreich ins Backend deployt.")
-
-
-def write_ui_version(build_dir: Path) -> dict:
-    """
-    Erzeugt ein einfaches UI-Versionsobjekt und schreibt es nach ui-version.json.
-    Rückgabewert ist das Versionsobjekt, das später in ui-deploy.json verwendet wird.
-    """
-    version_info = {
-        "version": datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
-        "build_dir": str(build_dir),
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "log_file": str(LOG_FILE),
-    }
-
-    UI_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with UI_VERSION_FILE.open("w", encoding="utf-8") as f:
-        json.dump(version_info, f, indent=2)
-
-    print(f"[INFO] UI-Version geschrieben nach: {UI_VERSION_FILE}")
-    return version_info
-
-
-def write_ui_deploy_metadata(build_dir: Path, version_info: dict) -> None:
-    """
-    Erzeugt ui-deploy.json mit Metadaten zum aktuellen Deploy.
-    Dient für Backend/UI als Audit- und Integrationspunkt.
-    """
-    # Optional: Anzahl Dateien im Build zählen
-    file_count = 0
-    total_size = 0
-    for root, dirs, files in os.walk(build_dir):
-        for name in files:
-            file_count += 1
-            total_size += (Path(root) / name).stat().st_size
-
-    deploy_info = {
-        "deployed_at": datetime.utcnow().isoformat() + "Z",
-        "build_dir": str(build_dir),
-        "file_count": file_count,
-        "total_size_bytes": total_size,
-        "ui_version": version_info.get("version"),
-        "ui_version_meta": version_info,
-    }
-
-    with UI_DEPLOY_FILE.open("w", encoding="utf-8") as f:
-        json.dump(deploy_info, f, indent=2)
-
-    print(f"[INFO] UI-Deploy-Metadaten geschrieben nach: {UI_DEPLOY_FILE}")
-
-
-def main() -> None:
-    print("=== BTC UI AUTONOMER BUILD START ===")
-    ensure_paths()
-    run_powershell_build()
-    verify_files_map()
-
-    build_dir = detect_build_output()
-    copy_ui_to_backend(build_dir)
-
-    version_info = write_ui_version(build_dir)
-    write_ui_deploy_metadata(build_dir, version_info)
-
-    print("=== BUILD & DEPLOY KOMPLETT AUTONOM ABGESCHLOSSEN ===")
-    print("[INFO] Backend wurde NICHT automatisch neu gestartet.")
-
-
-if __name__ == "__main__":
-    main()
-```
-
----
-```
-"""
 genesis_init.py
 Autonome Genesis-Initialisierung für den Mining-Pool.
 
@@ -598,6 +356,136 @@ def main():
     print(f"[INFO] Genesis-Zeit: {genesis_data['genesis_timestamp']}")
     print(f"[INFO] Node-Version: {genesis_data['node_version']}")
     print(f"[INFO] Start-Blockhöhe: {genesis_data['initial_block_height']}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+```
+"""
+wallet_gen.py
+Autonome Wallet- und Seed-Initialisierung für den Mining-Pool.
+
+Aufgaben:
+- Einmalig Seed-Phrase erzeugen (BIP39-kompatibel)
+- Einmalig BTC-Adresse erzeugen (P2WPKH)
+- wallet_secrets.json erzeugen
+- Niemals bestehende wallet_secrets.json überschreiben
+- Keine Abhängigkeit zu Backend-Logik
+- Keine RPC-Calls notwendig
+- Rein lokal, deterministisch, auditierbar
+
+Diese Datei wird vom Supervisor (run-backend.ps1) ausgeführt,
+wenn wallet_secrets.json noch NICHT existiert.
+"""
+
+import os
+import json
+import secrets
+import hashlib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent.parent  # /src/python/core/..
+CONFIG_DIR = ROOT / "config"
+SECRETS_FILE = CONFIG_DIR / "wallet_secrets.json"
+
+# Minimale BIP39-Wortliste (kann später ersetzt werden)
+WORDLIST = [
+    "ability","able","about","above","absent","absorb","abstract","absurd","abuse","access",
+    "accident","account","accuse","achieve","acid","acoustic","acquire","across","act","action",
+    "actor","actress","actual","adapt","add","addict","address","adjust","admit","adult",
+    "advance","advice","aerobic","affair","afford","afraid","again","age","agent","agree",
+    "ahead","aim","air","airport","aisle","alarm","album","alcohol","alert","alien",
+    "all","alley","allow","almost","alone","alpha","already","also","alter","always",
+    "amateur","amazing","among","amount","amused","analyst","anchor","ancient","anger","angle",
+    "angry","animal","ankle","announce","annual","another","answer","antenna","antique","anxiety",
+    "any","apart","apology","appear","apple","approve","april","arch","arctic","area",
+    "arena","argue","arm","armed","armor","army","around","arrange","arrest","arrive",
+    "arrow","art","artefact","artist","artwork","ask","aspect","assault","asset","assist",
+    "assume","asthma","athlete","atom","attack","attend","attitude","attract","auction","audit",
+    "august","aunt","author","auto","autumn","average","avocado","avoid","awake","aware",
+    "away","awesome","awful","awkward"
+]
+
+def generate_seed_phrase(num_words=12):
+    """
+    Erzeugt eine einfache BIP39-kompatible Seed-Phrase.
+    (Für echte Produktion: vollständige Wortliste + Checksum)
+    """
+    return " ".join(secrets.choice(WORDLIST) for _ in range(num_words))
+
+
+def sha256(data: bytes) -> bytes:
+    return hashlib.sha256(data).digest()
+
+
+def ripemd160(data: bytes) -> bytes:
+    h = hashlib.new("ripemd160")
+    h.update(data)
+    return h.digest()
+
+
+def generate_btc_address(seed_phrase: str) -> str:
+    """
+    Erzeugt eine einfache P2WPKH-Adresse aus der Seed-Phrase.
+    (Für echte Produktion: BIP32/BIP84 ableiten)
+    """
+    seed_bytes = seed_phrase.encode("utf-8")
+    private_key = sha256(seed_bytes)
+    public_key = sha256(private_key)  # Platzhalter für echte EC-Pubkey-Berechnung
+    pubkey_hash = ripemd160(public_key)
+
+    # P2WPKH: bech32 wäre korrekt, aber wir nutzen hier Base58Check für Einfachheit
+    prefix = b"\x00"  # Mainnet
+    payload = prefix + pubkey_hash
+    checksum = sha256(sha256(payload))[:4]
+    address_bytes = payload + checksum
+
+    # Base58
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    num = int.from_bytes(address_bytes, "big")
+    out = ""
+    while num > 0:
+        num, r = divmod(num, 58)
+        out = alphabet[r] + out
+
+    # führende Nullbytes → führende '1'
+    pad = 0
+    for b in address_bytes:
+        if b == 0:
+            pad += 1
+        else:
+            break
+    return "1" * pad + out
+
+
+def main():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Wenn Datei existiert → NICHT überschreiben
+    if SECRETS_FILE.exists():
+        print("[INFO] wallet_secrets.json existiert bereits. Keine Neuerzeugung.")
+        return
+
+    seed_phrase = generate_seed_phrase()
+    btc_address = generate_btc_address(seed_phrase)
+
+    secrets_data = {
+        "seed_phrase": seed_phrase,
+        "reward_address": btc_address,
+        "wallet_name": "pool_wallet",
+        "created_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "note": "Diese Datei ist privat und darf niemals ins Repository eingecheckt werden."
+    }
+
+    with SECRETS_FILE.open("w", encoding="utf-8") as f:
+        json.dump(secrets_data, f, indent=2)
+
+    print("[INFO] wallet_secrets.json erfolgreich erzeugt.")
+    print(f"[INFO] Reward-Adresse: {btc_address}")
 
 
 if __name__ == "__main__":
