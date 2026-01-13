@@ -221,6 +221,137 @@ Für tiefere technische Details siehe:
 
 ---
 ```
+
+"""
+wallet_gen.py
+Autonome Wallet- und Seed-Initialisierung für den Mining-Pool.
+
+Aufgaben:
+- Einmalig Seed-Phrase erzeugen (BIP39-kompatibel)
+- Einmalig BTC-Adresse erzeugen (P2WPKH)
+- wallet_secrets.json erzeugen
+- Niemals bestehende wallet_secrets.json überschreiben
+- Keine Abhängigkeit zu Backend-Logik
+- Keine RPC-Calls notwendig
+- Rein lokal, deterministisch, auditierbar
+
+Diese Datei wird vom Supervisor (run-backend.ps1) ausgeführt,
+wenn wallet_secrets.json noch NICHT existiert.
+"""
+
+import os
+import json
+import secrets
+import hashlib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent.parent  # /src/python/core/..
+CONFIG_DIR = ROOT / "config"
+SECRETS_FILE = CONFIG_DIR / "wallet_secrets.json"
+
+# Minimale BIP39-Wortliste (kann später ersetzt werden)
+WORDLIST = [
+    "ability","able","about","above","absent","absorb","abstract","absurd","abuse","access",
+    "accident","account","accuse","achieve","acid","acoustic","acquire","across","act","action",
+    "actor","actress","actual","adapt","add","addict","address","adjust","admit","adult",
+    "advance","advice","aerobic","affair","afford","afraid","again","age","agent","agree",
+    "ahead","aim","air","airport","aisle","alarm","album","alcohol","alert","alien",
+    "all","alley","allow","almost","alone","alpha","already","also","alter","always",
+    "amateur","amazing","among","amount","amused","analyst","anchor","ancient","anger","angle",
+    "angry","animal","ankle","announce","annual","another","answer","antenna","antique","anxiety",
+    "any","apart","apology","appear","apple","approve","april","arch","arctic","area",
+    "arena","argue","arm","armed","armor","army","around","arrange","arrest","arrive",
+    "arrow","art","artefact","artist","artwork","ask","aspect","assault","asset","assist",
+    "assume","asthma","athlete","atom","attack","attend","attitude","attract","auction","audit",
+    "august","aunt","author","auto","autumn","average","avocado","avoid","awake","aware",
+    "away","awesome","awful","awkward"
+]
+
+def generate_seed_phrase(num_words=12):
+    """
+    Erzeugt eine einfache BIP39-kompatible Seed-Phrase.
+    (Für echte Produktion: vollständige Wortliste + Checksum)
+    """
+    return " ".join(secrets.choice(WORDLIST) for _ in range(num_words))
+
+
+def sha256(data: bytes) -> bytes:
+    return hashlib.sha256(data).digest()
+
+
+def ripemd160(data: bytes) -> bytes:
+    h = hashlib.new("ripemd160")
+    h.update(data)
+    return h.digest()
+
+
+def generate_btc_address(seed_phrase: str) -> str:
+    """
+    Erzeugt eine einfache P2WPKH-Adresse aus der Seed-Phrase.
+    (Für echte Produktion: BIP32/BIP84 ableiten)
+    """
+    seed_bytes = seed_phrase.encode("utf-8")
+    private_key = sha256(seed_bytes)
+    public_key = sha256(private_key)  # Platzhalter für echte EC-Pubkey-Berechnung
+    pubkey_hash = ripemd160(public_key)
+
+    # P2WPKH: bech32 wäre korrekt, aber wir nutzen hier Base58Check für Einfachheit
+    prefix = b"\x00"  # Mainnet
+    payload = prefix + pubkey_hash
+    checksum = sha256(sha256(payload))[:4]
+    address_bytes = payload + checksum
+
+    # Base58
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    num = int.from_bytes(address_bytes, "big")
+    out = ""
+    while num > 0:
+        num, r = divmod(num, 58)
+        out = alphabet[r] + out
+
+    # führende Nullbytes → führende '1'
+    pad = 0
+    for b in address_bytes:
+        if b == 0:
+            pad += 1
+        else:
+            break
+    return "1" * pad + out
+
+
+def main():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Wenn Datei existiert → NICHT überschreiben
+    if SECRETS_FILE.exists():
+        print("[INFO] wallet_secrets.json existiert bereits. Keine Neuerzeugung.")
+        return
+
+    seed_phrase = generate_seed_phrase()
+    btc_address = generate_btc_address(seed_phrase)
+
+    secrets_data = {
+        "seed_phrase": seed_phrase,
+        "reward_address": btc_address,
+        "wallet_name": "pool_wallet",
+        "created_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "note": "Diese Datei ist privat und darf niemals ins Repository eingecheckt werden."
+    }
+
+    with SECRETS_FILE.open("w", encoding="utf-8") as f:
+        json.dump(secrets_data, f, indent=2)
+
+    print("[INFO] wallet_secrets.json erfolgreich erzeugt.")
+    print(f"[INFO] Reward-Adresse: {btc_address}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+```
 """
 genesis_init.py
 Autonome Genesis-Initialisierung für den Mining-Pool.
@@ -360,136 +491,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
 
----
-
-```
-"""
-wallet_gen.py
-Autonome Wallet- und Seed-Initialisierung für den Mining-Pool.
-
-Aufgaben:
-- Einmalig Seed-Phrase erzeugen (BIP39-kompatibel)
-- Einmalig BTC-Adresse erzeugen (P2WPKH)
-- wallet_secrets.json erzeugen
-- Niemals bestehende wallet_secrets.json überschreiben
-- Keine Abhängigkeit zu Backend-Logik
-- Keine RPC-Calls notwendig
-- Rein lokal, deterministisch, auditierbar
-
-Diese Datei wird vom Supervisor (run-backend.ps1) ausgeführt,
-wenn wallet_secrets.json noch NICHT existiert.
-"""
-
-import os
-import json
-import secrets
-import hashlib
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent.parent.parent  # /src/python/core/..
-CONFIG_DIR = ROOT / "config"
-SECRETS_FILE = CONFIG_DIR / "wallet_secrets.json"
-
-# Minimale BIP39-Wortliste (kann später ersetzt werden)
-WORDLIST = [
-    "ability","able","about","above","absent","absorb","abstract","absurd","abuse","access",
-    "accident","account","accuse","achieve","acid","acoustic","acquire","across","act","action",
-    "actor","actress","actual","adapt","add","addict","address","adjust","admit","adult",
-    "advance","advice","aerobic","affair","afford","afraid","again","age","agent","agree",
-    "ahead","aim","air","airport","aisle","alarm","album","alcohol","alert","alien",
-    "all","alley","allow","almost","alone","alpha","already","also","alter","always",
-    "amateur","amazing","among","amount","amused","analyst","anchor","ancient","anger","angle",
-    "angry","animal","ankle","announce","annual","another","answer","antenna","antique","anxiety",
-    "any","apart","apology","appear","apple","approve","april","arch","arctic","area",
-    "arena","argue","arm","armed","armor","army","around","arrange","arrest","arrive",
-    "arrow","art","artefact","artist","artwork","ask","aspect","assault","asset","assist",
-    "assume","asthma","athlete","atom","attack","attend","attitude","attract","auction","audit",
-    "august","aunt","author","auto","autumn","average","avocado","avoid","awake","aware",
-    "away","awesome","awful","awkward"
-]
-
-def generate_seed_phrase(num_words=12):
-    """
-    Erzeugt eine einfache BIP39-kompatible Seed-Phrase.
-    (Für echte Produktion: vollständige Wortliste + Checksum)
-    """
-    return " ".join(secrets.choice(WORDLIST) for _ in range(num_words))
-
-
-def sha256(data: bytes) -> bytes:
-    return hashlib.sha256(data).digest()
-
-
-def ripemd160(data: bytes) -> bytes:
-    h = hashlib.new("ripemd160")
-    h.update(data)
-    return h.digest()
-
-
-def generate_btc_address(seed_phrase: str) -> str:
-    """
-    Erzeugt eine einfache P2WPKH-Adresse aus der Seed-Phrase.
-    (Für echte Produktion: BIP32/BIP84 ableiten)
-    """
-    seed_bytes = seed_phrase.encode("utf-8")
-    private_key = sha256(seed_bytes)
-    public_key = sha256(private_key)  # Platzhalter für echte EC-Pubkey-Berechnung
-    pubkey_hash = ripemd160(public_key)
-
-    # P2WPKH: bech32 wäre korrekt, aber wir nutzen hier Base58Check für Einfachheit
-    prefix = b"\x00"  # Mainnet
-    payload = prefix + pubkey_hash
-    checksum = sha256(sha256(payload))[:4]
-    address_bytes = payload + checksum
-
-    # Base58
-    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    num = int.from_bytes(address_bytes, "big")
-    out = ""
-    while num > 0:
-        num, r = divmod(num, 58)
-        out = alphabet[r] + out
-
-    # führende Nullbytes → führende '1'
-    pad = 0
-    for b in address_bytes:
-        if b == 0:
-            pad += 1
-        else:
-            break
-    return "1" * pad + out
-
-
-def main():
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Wenn Datei existiert → NICHT überschreiben
-    if SECRETS_FILE.exists():
-        print("[INFO] wallet_secrets.json existiert bereits. Keine Neuerzeugung.")
-        return
-
-    seed_phrase = generate_seed_phrase()
-    btc_address = generate_btc_address(seed_phrase)
-
-    secrets_data = {
-        "seed_phrase": seed_phrase,
-        "reward_address": btc_address,
-        "wallet_name": "pool_wallet",
-        "created_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
-        "note": "Diese Datei ist privat und darf niemals ins Repository eingecheckt werden."
-    }
-
-    with SECRETS_FILE.open("w", encoding="utf-8") as f:
-        json.dump(secrets_data, f, indent=2)
-
-    print("[INFO] wallet_secrets.json erfolgreich erzeugt.")
-    print(f"[INFO] Reward-Adresse: {btc_address}")
-
-
-if __name__ == "__main__":
-    main()
 ```
 
 ---
